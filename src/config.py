@@ -18,7 +18,7 @@ DEFAULTS: dict[str, Any] = {
     "seed": RANDOM_STATE,
     "cv": {"n_splits": 5, "shuffle": True, "method": "auto"},
     "features": {
-        "max_features": 300_000,
+        "max_features": 100_000,
         "min_df": 2,
         "sublinear_tf": True,
         "char_ngram_range": [2, 5],

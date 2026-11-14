@@ -7,7 +7,7 @@ cv:
   method: auto
 
 features:
-  max_features: 200000
+  max_features: 100000
   min_df: 2
   sublinear_tf: true
   char_ngram_range: [2, 5]
@@ -22,19 +22,19 @@ models:
     features: [char]
     classifier: linearsvc
     C: 1.0
-    max_features: 200000
+    max_features: 100000
   - name: word_tfidf_linearsvc
     features: [word]
     classifier: linearsvc
     C: 1.0
-    max_features: 150000
+    max_features: 80000
   - name: char_wb_tfidf_linearsvc
     features: [char_wb]
     classifier: linearsvc
     C: 1.0
-    max_features: 200000
+    max_features: 100000
   - name: char_tfidf_logreg
     features: [char]
     classifier: logreg
     C: 2.0
-    max_features: 150000
+    max_features: 100000

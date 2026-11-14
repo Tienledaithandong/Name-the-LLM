@@ -117,10 +117,25 @@ Pooled out-of-fold balanced accuracy:
 | stratified random | 0.0510 | 0.0514 ± 0.0061 | 0.0504 |
 
 Greedy blending selected the single best model (gain 0.0), so no blend was
-adopted. On the smaller 40-prompt fixture (428 rows, 3 folds) the style-only
-model reached 0.3697 pooled OOF vs 0.1477 for a 3k-feature char model — the
-fixture encodes style in punctuation, and grouped folds correctly refuse to
-reward char n-grams that merely memorise prompt content.
+adopted.
+
+**Feature ablation** (`configs/features.yaml`, same folds):
+
+| ablation | pooled OOF |
+|---|---|
+| char + style, LogisticRegression | **0.4823** |
+| style only, LogisticRegression | 0.4723 |
+| char + style, LinearSVC | 0.3650 |
+| char only, LinearSVC | 0.2061 |
+| word + char, LinearSVC | 0.1674 |
+| word only, LinearSVC | 0.0951 |
+
+On the smaller 40-prompt fixture (428 rows, 3 folds) the style-only model
+reached 0.3697 pooled OOF vs 0.1477 for a 3k-feature char model. The fixture
+encodes style in punctuation/formatting, so this says the grouped protocol works
+and the style block carries signal — it says nothing about real model
+fingerprints. Exact per-fold scores, timings and RSS are in
+`experiments/registry.csv`.
 
 **No official-data result exists.** The table will be replaced with verified
 numbers, per-fold spread and per-class recalls once the data is downloaded.

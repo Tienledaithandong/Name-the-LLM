@@ -66,3 +66,16 @@ Greedy OOF selection is cheap but can overfit 2,699 rows. `ensemble.yaml` sets
 and the single best model should be used instead.
 
 Reopen if: repeated-seed checks show the blend advantage is unstable.
+
+## D008 — Vocabulary and iteration budgets (2026-11-14)
+
+First ablation run stalled for over ten minutes on `char_plus_style`: liblinear
+with 200k features, 18 classes and `max_iter=5000` spends most of its time in the
+final iterations without converging (sklearn emitted `ConvergenceWarning`).
+Configs now cap char vocabularies at 100k (word 80k) and `LinearSVC` uses
+`max_iter=2000`. Rationale: 2,699 training rows cannot support a 200k-feature
+vocabulary without heavy regularisation, and the warning showed the extra
+iterations were not buying convergence.
+
+Reopen if: official-data ablations show a large-capacity model is better; raise
+the caps deliberately and record the runtime.

@@ -22,8 +22,8 @@ training prompts only, and distinguish it from the non-deployable
 prompt-centring diagnostic. On a synthetic fixture built to mimic the schema and
 style structure, the pipeline runs end-to-end on CPU in about two minutes and the
 sparse baselines score 0.095–0.234 pooled out-of-fold balanced accuracy against
-0.051–0.054 for reference baselines; these are pipeline-validation numbers, not
-competition results.
+0.051–0.054 for reference baselines, while stylometric models reach 0.472–0.482;
+these are pipeline-validation numbers, not competition results.
 
 ## 1. Introduction
 
@@ -141,8 +141,10 @@ because the repository must be testable without the competition data.
 Greedy blending selected the single best model (gain 0.0000), so no blend was
 adopted — the selector declines to add complexity without validated gain.
 
-On a smaller 40-prompt fixture (428 rows, 3 folds), a 3k-feature char model
-scored 0.1477 while the style-only model scored **0.3697** pooled OOF. The
+Adding stylometry dominates on this fixture (section 7): style-only reaches
+0.4723 and char+style logistic regression 0.4823, versus 0.2061 for char TF-IDF
+alone. On a smaller 40-prompt fixture (428 rows, 3 folds), a 3k-feature char
+model scored 0.1477 while the style-only model scored 0.3697 pooled OOF. The
 fixture encodes style at the punctuation/formatting level, and grouped folds
 correctly refuse to reward char n-grams that memorise shared prompt content. This
 is the clearest evidence in the fixture run that the grouped protocol is doing
@@ -159,11 +161,29 @@ its job, and it motivates H1/H2 rather than settling them.
 
 ## 7. Ablations
 
-`configs/features.yaml` (word / char / style / char+style / word+char /
-char+style+logreg) runs on the registered folds and writes one row per model to
-`experiments/registry.csv` plus `artifacts/cv/<dataset>/summary.md`. Fixture
-numbers are recorded there with `external_data_id=synthetic-fixture`; official
-numbers remain pending. A null or negative ablation is reported, not discarded.
+`configs/features.yaml` on the fixture's five registered folds (1,671 rows):
+
+| ablation | pooled OOF | fold mean ± std | fit s (5 folds) | peak RSS |
+|---|---|---|---|---|
+| char + style, LogisticRegression | **0.4823** | 0.4832 ± 0.0283 | 364.7 | 0.18 GB |
+| style only, LogisticRegression | 0.4723 | 0.4732 ± 0.0322 | 22.8 | 0.18 GB |
+| char + style, LinearSVC | 0.3650 | 0.3662 ± 0.0294 | 425.7 | 0.18 GB |
+| char only, LinearSVC | 0.2061 | 0.2059 ± 0.0110 | 45.8 | 0.18 GB |
+| word + char, LinearSVC | 0.1674 | 0.1675 ± 0.0191 | 53.3 | 0.18 GB |
+| word only, LinearSVC | 0.0951 | 0.0945 ± 0.0144 | 5.3 | 0.18 GB |
+
+(Stylometry on this fixture is deliberately over-represented because the
+synthetic profiles are generated from punctuation and formatting habits. The
+official-data ablation is the one that matters and is still pending. Exact
+per-fold scores, timings and RSS for every row are in `experiments/registry.csv`
+and `artifacts/cv/synthetic/metrics/*.json`.)
+
+Interpretation on the fixture: character n-grams capture topical content shared
+across models and generalise poorly across prompts; explicit style features carry
+the signal. `word + char` is worse than char alone — concatenating sparse blocks
+adds dimensionality without adding transferable signal at this sample size. This
+supports measuring H1 on real data but does not settle it: the fixture's style
+profiles are not real model fingerprints.
 
 ## 8. Error analysis
 

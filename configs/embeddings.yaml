@@ -14,14 +14,14 @@ models:
     svd: 256
     classifier: linearsvc
     C: 1.0
-    max_features: 200000
+    max_features: 100000
   - name: char_svd256_nuisance8
     features: [char]
     svd: 256
     nuisance_k: 8
     classifier: linearsvc
     C: 1.0
-    max_features: 200000
+    max_features: 100000
   - name: style_svd64_nuisance8
     features: []
     style: true

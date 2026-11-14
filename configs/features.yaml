@@ -8,7 +8,7 @@ cv:
   method: auto
 
 features:
-  max_features: 200000
+  max_features: 100000
   min_df: 2
   sublinear_tf: true
 
@@ -16,11 +16,11 @@ models:
   - name: char_only
     features: [char]
     classifier: linearsvc
-    max_features: 200000
+    max_features: 100000
   - name: word_only
     features: [word]
     classifier: linearsvc
-    max_features: 150000
+    max_features: 80000
   - name: style_only
     features: []
     style: true
@@ -30,14 +30,14 @@ models:
     features: [char]
     style: true
     classifier: linearsvc
-    max_features: 200000
+    max_features: 100000
   - name: word_plus_char
     features: [word, char]
     classifier: linearsvc
-    max_features: 200000
+    max_features: 100000
   - name: char_plus_style_logreg
     features: [char]
     style: true
     classifier: logreg
     C: 2.0
-    max_features: 150000
+    max_features: 100000

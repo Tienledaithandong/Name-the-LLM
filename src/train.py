@@ -65,6 +65,8 @@ def describe(raw: dict) -> str:
         bits.append(f"svd{raw['svd']}")
     if raw.get("nuisance_k"):
         bits.append(f"nuisance{raw['nuisance_k']}")
+    if raw.get("embedding"):
+        bits.append(f"emb:{raw['embedding'].get('backend', 'hashing')}")
     bits.append(raw.get("classifier", "linearsvc"))
     return "|".join(bits)
 
@@ -192,9 +194,8 @@ def run_cv(
                     "fit_seconds": payload["fit_seconds"],
                     "infer_seconds": payload["infer_seconds"],
                     "peak_ram_gb": payload["peak_ram_gb"],
-                    "external_data_id": "synthetic-fixture"
-                    if dataset_label == "synthetic"
-                    else "none",
+                    "external_data_id": raw.get("external_data_id")
+                    or ("synthetic-fixture" if dataset_label == "synthetic" else "none"),
                     "artifact_path": str(oof_path),
                     "public_lb_score": "",
                     "notes": "synthetic smoke run - not a competition result"

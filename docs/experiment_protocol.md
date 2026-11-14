@@ -11,7 +11,10 @@ Frozen before the first scored experiment. Any change here is an ADR in
 - **Secondary (robustness):** prompt-held-out split with a different seed
   (`make_holdout`). Used only for the final check, never for selection.
 - **Repeatability:** seed checks with 2–3 alternative seeds are reported as a
-  stability check, not used to pick the winner.
+  stability check, not used to pick the winner. Implemented by
+  `src/stability.py` (`python -m src.cli stability`, `make stability`), which
+  re-runs grouped CV for the blend members under alternative seeds and scores
+  the fixed adopted weights on the secondary holdout (`make_holdout`).
 - **Persistence:** `artifacts/splits/splits_<dataset>.json` stores exact indices,
   method, seed, row count and the dataset fingerprint. Loading a split whose
   fingerprint differs from the current data raises; stale indices are never

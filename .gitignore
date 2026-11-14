@@ -20,9 +20,11 @@ venv/
 .env
 .env.*
 
-# Large generated output
+# Generated figures: the small aggregate PNGs are portfolio deliverables and are
+# tracked; ignore any other large generated output under figures/.
 figures/*
 !figures/.gitkeep
+!figures/*.png
 
 # Editor / OS
 .DS_Store

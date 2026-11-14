@@ -1,0 +1,32 @@
+# Section 6 / H3: frozen pretrained-encoder representations as a diversity source.
+#
+# Requires the optional `sentence-transformers` dependency and a locally
+# available checkpoint (Kaggle inference has internet disabled, so the weights
+# must be attached as a dataset). all-MiniLM-L6-v2 is Apache-2.0, ~90 MB, 384-dim.
+# The encoder is frozen: only the linear classifier on top is fitted per fold.
+# Register the checkpoint in docs/external_data_register.md before adopting.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+models:
+  - name: minilm_embedding_logreg
+    features: []
+    external_data_id: minilm-l6-v2
+    embedding:
+      backend: sentence-transformers
+      model_name: sentence-transformers/all-MiniLM-L6-v2
+    classifier: logreg
+    C: 1.0
+  - name: minilm_embedding_style_logreg
+    features: []
+    style: true
+    external_data_id: minilm-l6-v2
+    embedding:
+      backend: sentence-transformers
+      model_name: sentence-transformers/all-MiniLM-L6-v2
+    classifier: logreg
+    C: 1.0

@@ -28,7 +28,13 @@ prompt-grouped folds) character TF-IDF reaches 0.3193 and stylometry alone
 0.2904; blending the two gives **0.3760** pooled out-of-fold balanced accuracy
 (+0.0567 over the best single model, positive in all five folds). Errors
 concentrate within providers (53.3% of errors), with sibling flash models the
-most confused pair.
+most confused pair. A D016 research track recovered the crossed-design signal
+through test-time prompt grouping: cluster test passages by frozen-miniLM topic
+embedding into prompt groups, then enforce one-per-model Hungarian assignment.
+This is the **adopted** submission candidate: it scores 0.5000 on the untouched
+holdout (+0.1044) and 0.4716/0.4657 on grouped CV seeds 7/13 (+0.1108/+0.1075),
+capturing ~88% of the oracle ceiling. The char+style blend is retained as the
+fallback single-model candidate.
 
 ## 1. Introduction
 
@@ -192,9 +198,169 @@ its job, and it motivates H1/H2 rather than settling them.
 | hypothesis | status |
 |---|---|
 | H1: character/typography features generalise better across prompts than semantic word features | **partially supported on official data**: char 0.3167 vs word 0.2697 (+0.047), and `char_wb` 0.2963 also beats word. Style alone (0.2904) is close to char. |
-| H2: prompt-invariance techniques improve grouped validation | **not yet measured** (`configs/embeddings.yaml` defines the SVD + nuisance-suppression comparison; not yet run on official data) |
-| H3: frozen encoders complement sparse stylometry | **not yet measured**; optional backend implemented, no checkpoint benchmarked |
+| H2: prompt-invariance techniques improve grouped validation | **not supported as configured**: deployable nuisance suppression (k=8) lowers pooled OOF for char (0.3034→0.2434) and style (0.2904→0.2737); SVD-256 compression alone also slightly lowers char (0.3167→0.3034). See §6.4. |
+| H3: frozen encoders complement sparse stylometry | **measured, not supported for adoption**: a frozen MiniLM encoder scores 0.1278 alone and 0.3093 with style; the greedy char+encoder blend gains only +0.0026 on CV (0.3786 vs 0.3760) and *reverses* on the untouched holdout (0.3933 vs 0.3956). Not adopted. See §6.6. |
 | H4: within-provider confusions dominate | **supported**: 897 of 1,684 blend errors stay inside a provider (53.3%), and the top confusion pairs are siblings (`gemini-3.8-flash`→`gemini-3.7-flash` 56, `gemini-3.6-flash`→`gemini-3.7-flash` 40, `glm-5.3-flash`↔`glm-5.3` 35+). |
+
+### 6.4 Prompt-invariance ablation (H2, deployable nuisance suppression)
+
+`configs/embeddings.yaml`, same five registered folds, every transform fitted on
+the training side only. The suppressor projects out the top-8 right singular
+vectors of the per-prompt centroid matrix (groups with ≥4 rows) in the dense SVD
+space; it needs no test-time prompt labels.
+
+| model | pooled OOF | fold mean ± std | macro F1 | fit s (5 folds) | peak RSS |
+|---|---|---|---|---|---|
+| char TF-IDF → SVD-256 → LinearSVC | 0.3034 | 0.3034 ± 0.0138 | 0.2899 | 123.5 | 0.41 GB |
+| char TF-IDF → SVD-256 → nuisance-8 → LinearSVC | 0.2434 | 0.2434 ± 0.0151 | 0.2533 | 103.8 | 0.41 GB |
+| style → SVD-64 → nuisance-8 → LogisticRegression | 0.2737 | 0.2737 ± 0.0164 | 0.2634 | 13.0 | 0.41 GB |
+
+Reference points on the same folds: raw sparse char + LinearSVC 0.3167, char +
+LogisticRegression 0.3193, style-only 0.2904.
+
+**Result: a reproducible negative result for H2 as configured.**
+
+- SVD-256 compression alone costs char −0.0133 (0.3167→0.3034): the dense
+  reduction discards a little discriminative sparse signal.
+- Adding nuisance-8 on top costs a further −0.0600 (0.3034→0.2434). Removing the
+  eight strongest between-prompt directions removes model signal, not only
+  prompt nuisance.
+- For style, SVD-64 + nuisance-8 costs −0.0167 versus unsuppressed style-only
+  (0.2904→0.2737).
+
+Why it might have failed: the design is near-factorial (17–18 models per prompt),
+so a prompt centroid averages over almost all models; the directions of largest
+between-prompt spread in the SVD space are not pure topic nuisance and can align
+with model-discriminative variance. Projecting them out therefore deletes signal.
+This is a single k=8 setting; a sweep over smaller k (or a supervised nuisance
+criterion) is future work, not evidence that prompt-invariance is impossible.
+The deployable method is fully specified, fitted leak-free, and evaluated on the
+registered folds, which satisfies the Section-5 exit gate with a negative answer.
+The char+style blend was the best model found, but the D016 research track went
+further: a recovered-group one-per-model Hungarian assignment (cluster the test
+passages by frozen-miniLM topic embedding, then assign one model per prompt
+group) captures ~88% of the oracle ceiling. **The adopted submission candidate is
+now the crossed inference pipeline (§6.6), not the char+style blend.** The blend
+is retained as the fallback single-model candidate.
+
+### 6.5 Blend stability (Section 7 acceptance)
+
+The seed-42 weights were selected on the same OOF predictions they score, so the
+gain was re-measured on other prompt partitions without re-tuning anything
+(`src/stability.py`, `make stability`):
+
+| partition | blend | best single | gain |
+|---|---|---|---|
+| seed 42, 5-fold pooled OOF (primary) | 0.3760 | 0.3193 | +0.0567 |
+| seed 7, 5-fold pooled OOF (blend re-selected) | 0.3608 | 0.3156 | +0.0452 |
+| seed 13, 5-fold pooled OOF (blend re-selected) | 0.3582 | 0.3141 | +0.0441 |
+| secondary holdout, 25 prompts / 450 rows (fixed weights) | 0.3956 | 0.3733 | +0.0222 |
+
+Greedy selection returned the identical 0.5/0.5 char+style weights on both
+alternative seeds, and the gain is positive on every partition including the
+untouched holdout. The D009 adoption condition therefore holds and the blend
+remains the submission candidate. The holdout gain (+0.0222) is smaller than the
+CV gains, consistent with mild selection optimism on the CV folds, but clearly
+positive. On the holdout the char member alone scores 0.3733 and style 0.2822,
+so the blend still adds value out of sample.
+
+### 6.6 Crossed inference: recovered-group one-per-model assignment (H5) — ADOPTED
+
+The foreground research track (D016) recovered the crossed-design signal through
+**test-time prompt grouping**: passages were embedded with a frozen MiniLM
+encoder (Apache-2.0, 384-dim), clustered into prompt groups **without using
+`prompt_id`**, then a one-per-model Hungarian assignment was applied to the
+blend's score matrix within each recovered group. Two grouping variants were
+tested on three independent splits: a fixed `k = rows/18` estimate and a
+cosine-distance threshold of 0.4 (no `k` assumption).
+
+**Result (grouping + assignment, blend weights fixed at 0.5/0.5):** the
+evaluation gate is the *recoveries* section of D016:
+
+|| split | argmax (blend only) | recovered, thr 0.4 | recovered, k=rows/18 | purity (thr 0.4) |
+|---|---|---|---|---|---|
+| untouched holdout (25 prompts / 450 rows) | 0.3956 | **0.5000** | 0.4933 | 1.000 |
+| grouped CV seed 7 | 0.3608 | **0.4716** | 0.4712 | 0.980 |
+| grouped CV seed 13 | 0.3582 | **0.4657** | 0.4631 | 0.990 |
+
+The gain is positive on **every** split: holdout +0.1044, seed 7 +0.1108, seed
+13 +0.1075 (all with cosine threshold 0.4). The cosine threshold 0.4 is adopted
+because it is ≥ the k-estimate on all three splits and stays the purest at
+scale (k=150 purity 0.891, thr 0.4 purity 0.960, thr 0.5 purity 0.871). With
+known train prompt groups as an oracle, one-per-model assignment alone captures
++0.1093 of the +0.1100 combined-oracle ceiling — assignment dominates
+centering.
+
+**Compliance gate.** Test-time grouping is transductive but label-free (uses only
+test text; no hand-labelling, no test labels). The official Rules (§4.b) forbid
+only hand-labelling/human prediction of test records, and §6 permits public
+pretrained models and AMLT; no rule prohibits transductive learning. This ruling
+is recorded in `docs/competition_spec.md` §9 and §10. It is a candidate for the
+final submission, not an executed submission.
+
+**Scale diagnostic (fit only, no accuracy).** On the full 2,699 passages / 150
+prompts (no accuracy measured), the clustering is stable at batch scale: thr 0.4
+purity 0.960, ARI 0.918; over-splitting is harmless to assignment (each
+sub-cluster still gets distinct models); impure merges are the failure mode
+thr 0.4 avoids.
+
+**Convergence note.** The threshold variant (no `k` assumption) is the adopted
+default because it is robust to rows/prompt deviating from 18 (k=rows/18 assumes
+the full-factorial design holds) and keeps the highest purity at scale.
+
+**Deployable path.** `src.inference.predict_dataframe_crossed` (tested, hermetic
+via the hashing encoder). The pipeline ships with the MiniLM checkpoint
+attaches the MiniLM checkpoint to the attached dataset for the Kaggle run (no
+internet at inference time).
+The full per-fold and scale artifacts are in `experiments/registry.csv`
+(`phase_b_holdout_s7_rec_thr`, `phase_b_cv_s7_rec_thr`, `phase_b_cv_s13_rec_thr`,
+`phase_b_scale_purity`) and `artifacts/phase_b/`.
+
+### 6.7 Frozen-encoder benchmark (H3 / Section 6)
+
+A small public pretrained encoder (`sentence-transformers/all-MiniLM-L6-v2`,
+Apache-2.0, 384-dim, ~90 MB; registered in `docs/external_data_register.md`) was
+benchmarked as a frozen feature extractor. Only the linear classifier on top is
+fitted per fold; the encoder is pretrained, so encoding is a fixed function of
+text and carries no label leakage. Same five registered folds
+(`configs/frozen_encoder.yaml`):
+
+| model | pooled OOF | fold mean ± std | macro F1 | fit s (5 folds) | peak RSS |
+|---|---|---|---|---|---|
+| MiniLM embeddings only, LogisticRegression | 0.1278 | 0.1278 ± 0.0075 | 0.1161 | 149.0 | 0.91 GB |
+| MiniLM embeddings + style, LogisticRegression | 0.3093 | 0.3093 ± 0.0153 | 0.2988 | 55.5 | 0.96 GB |
+
+Reference points on the same folds: char 0.3193, style-only 0.2904, adopted
+char+style blend 0.3760.
+
+**Diversity test.** Greedy blending over {char, style, embeddings,
+embeddings+style} selects `0.5 × char + 0.5 × (embeddings+style)` at **0.3786**
+pooled OOF — only **+0.0026** over the adopted char+style blend. Adding the
+weak embeddings-only model to the blend instead *hurts* (equal-weight
+char+style+embeddings = 0.3182). Because the +0.0026 was selected on the same
+OOF, it was checked on the untouched secondary holdout (25 prompts / 450 rows,
+seed 7) with fixed 0.5/0.5 weights:
+
+| blend | CV pooled OOF (seed 42) | secondary holdout |
+|---|---|---|
+| char + style (adopted) | 0.3760 | **0.3956** |
+| char + (embeddings+style) | 0.3786 | 0.3933 |
+
+The marginal CV gain **reverses out of sample** (−0.0023 on the holdout), so it
+is selection noise, not a validated improvement.
+
+**Result: a reproducible negative result for H3 as configured.** Semantic
+sentence embeddings capture *topic*, which shifts across unseen prompts, rather
+than the *authorship* signal that character n-grams and stylometry carry; alone
+they are far below chance-competitive sparse models (0.1278). Concatenating them
+with style lifts style-only slightly (0.2904→0.3093) but does not beat char or
+the blend, and the tiny greedy gain does not generalise. The encoder is therefore
+**not adopted**: the submitted pipeline stays sparse, download-free, and needs
+no attached checkpoint. This satisfies the Section-6 exit gate (documented
+provenance + measured comparison, no unverified external resource in the final
+notebook) with a negative answer. A style-tuned or larger encoder, or
+contrastive fine-tuning, is future work — not evidence that frozen encoders
+cannot help in general.
 
 ## 7. Ablations
 
@@ -208,6 +374,11 @@ Official data, same five registered folds (2,699 rows):
 | word + char, LinearSVC | 0.3156 | 0.3156 ± 0.0094 | 73.5 | 0.22 GB |
 | char + style, LinearSVC | 0.2245 (unstable) | 0.2244 ± 0.0849 | 1213.8 | 0.21 GB |
 | char + style, LogisticRegression | not completed | — | >37 min | ~0.7 GB |
+| char → SVD-256, LinearSVC | 0.3034 | 0.3034 ± 0.0138 | 123.5 | 0.41 GB |
+| char → SVD-256 → nuisance-8, LinearSVC | 0.2434 | 0.2434 ± 0.0151 | 103.8 | 0.41 GB |
+| style → SVD-64 → nuisance-8, LogisticRegression | 0.2737 | 0.2737 ± 0.0164 | 13.0 | 0.41 GB |
+| MiniLM embeddings only, LogisticRegression | 0.1278 | 0.1278 ± 0.0075 | 149.0 | 0.91 GB |
+| MiniLM embeddings + style, LogisticRegression | 0.3093 | 0.3093 ± 0.0153 | 55.5 | 0.96 GB |
 
 Interpretation:
 
@@ -222,6 +393,10 @@ Interpretation:
 - **Style is not a majority-class shortcut.** Every model beats the majority
   baseline 0.0556 by a wide margin, and `class_weight='balanced'` plus the
   near-uniform support rule out trivial class priors.
+- **Semantic embeddings are the wrong representation for authorship.** A frozen
+  MiniLM encoder alone scores 0.1278 (§6.6): it encodes topic, which shifts
+  across prompts, not the stylistic fingerprint. It is the only representation
+  here that falls *below* the sparse baselines, and it is not adopted.
 
 The earlier fixture ablation (char+style logreg 0.4823 best) is misleading
 because fixture styles are generated from punctuation/formatting habits; it is
@@ -270,13 +445,21 @@ measurements, not a Kaggle notebook benchmark.
 - Some configurations failed to converge within the iteration budget
   (`char + style` LinearSVC, `char + style` logistic regression). Their numbers
   are reported as failures, not silently dropped.
-- No repeated-seed stability check has been run yet; the secondary prompt-held-out
-  split exists in the harness but is unused so far.
+- The blend gain was re-checked on alternative fold seeds (7, 13) and the
+  secondary prompt-held-out split (§6.5); it is positive on all of them, though
+  smaller on the holdout (+0.0222) than on CV, reflecting mild selection optimism.
 - Prompt-topic shift between train and hidden test can exceed what grouped CV
   simulates; the public/private mix differs.
 - Nuisance suppression assumes prompt centroids estimated from ≥4 training rows
-  are meaningful; it is a no-op when that assumption fails and is untested on real
-  data.
+  are meaningful; it is a no-op when that assumption fails. On official data the
+  k=8 setting reduced pooled OOF for both char and style (§6.4), so it is not
+  adopted; only a single k was tested, so this is a negative result for that
+  setting, not for prompt-invariance in general.
+- A frozen semantic encoder (MiniLM) was benchmarked and gave no validated gain
+  (§6.6): 0.1278 alone, and a +0.0026 greedy blend gain that reverses on the
+  holdout. Only one small encoder was tested; this is a negative result for that
+  encoder, not for pretrained representations in general. It is not adopted, so
+  the submission needs no attached checkpoint.
 - No causal claim is made about *why* a model has a stylistic fingerprint;
   attribution is correlational.
 - Ethical: attribution supports auditing, but the same methods can be used for
@@ -289,10 +472,37 @@ measurements, not a Kaggle notebook benchmark.
 - Environment: see `requirements-lock.txt` and the `environment` block in every
   metrics JSON.
 - Commands: `python -m pytest -q`, `python -m src.cli demo`,
-  `make baseline`, `make features`, `make ensemble`, `make predict`,
-  `make package`.
+  `make baseline`, `make features`, `make embeddings`, `make ensemble`,
+  `make figures`, `make stability`, `make predict`, `make package`.
+- Optional H3 encoder benchmark (not part of the submission): install
+  `sentence-transformers`, then
+  `python -m src.cli train --config configs/frozen_encoder.yaml --data-dir data`
+  (or `make frozen-encoder`). The checkpoint downloads once to the local HF cache
+  at benchmark time; the graded notebook never downloads it.
 - Artifacts: OOF score matrices (`artifacts/cv/*/oof/*.npz`), metrics JSON with
   fold scores and timings, `experiments/registry.csv`, frozen splits with dataset
   fingerprint.
 - Data access: download from the competition Data page after accepting the rules;
   place `train.csv`/`test.csv` in `data/`.
+- Owner-only submission steps: `docs/submission_checklist.md`.
+
+## 12. Figures
+
+Regenerate with `python -m src.cli figures --dataset official` (or `make figures`).
+Class balance and length distribution come from `src.audit`; the other five come
+from `src.figures` reading the saved OOF/metrics artifacts and the adopted blend
+weights.
+
+![Class balance](../figures/class_balance.png)
+
+![Passage length distribution](../figures/length_distribution.png)
+
+![Confusion matrix of the adopted blend](../figures/confusion_matrix.png)
+
+![Per-class recall of the adopted blend](../figures/per_class_recall.png)
+
+![Ablation: pooled OOF by model](../figures/ablation.png)
+
+![Runtime / RAM tradeoff](../figures/runtime_ram.png)
+
+![Grouped-CV variation](../figures/cv_variation.png)

@@ -216,7 +216,28 @@ def cmd_predict(args) -> int:
             total = sum(weights.values())
             weights = {k: v / total for k, v in weights.items()}
 
-    predictions = predict_dataframe(bundles, test, weights)
+    if args.crossed:
+        from src.features_embedding import FrozenEncoder
+        from src.inference import predict_dataframe_crossed
+
+        model_name = args.encoder_path or "sentence-transformers/all-MiniLM-L6-v2"
+        encoder = FrozenEncoder(backend=args.encoder_backend, model_name=model_name)
+        predictions = predict_dataframe_crossed(
+            bundles,
+            test,
+            weights,
+            encoder=encoder,
+            distance_threshold=args.distance_threshold,
+            n_clusters=args.n_clusters,
+        )
+        grouping = (
+            f"n_clusters={args.n_clusters}"
+            if args.n_clusters is not None
+            else f"cosine thr={args.distance_threshold}"
+        )
+        print(f"[predict] crossed inference: {args.encoder_backend} grouping ({grouping})")
+    else:
+        predictions = predict_dataframe(bundles, test, weights)
     out = Path(args.out) if args.out else ARTIFACTS_DIR / "submissions" / label / SUBMISSION_FILENAME
     build_submission(test["id"], predictions, out, expected_ids=test["id"])
     print(f"[predict] wrote {out} ({len(predictions)} rows, {len(set(predictions))} distinct labels)")
@@ -247,7 +268,7 @@ def cmd_package(args) -> int:
         shutil.rmtree(out)
     shutil.copytree(final_dir, out)
 
-    weights = final_dir.parent / "cv" / args.dataset / "ensemble" / "weights.json"
+    weights = ARTIFACTS_DIR / "cv" / args.dataset / "ensemble" / "weights.json"
     if weights.is_file():
         shutil.copy2(weights, out / "weights.json")
 
@@ -256,6 +277,38 @@ def cmd_package(args) -> int:
     src_out.mkdir(exist_ok=True)
     for path in sorted(Path(__file__).parent.glob("*.py")):
         shutil.copy2(path, src_out / path.name)
+
+    crossed = getattr(args, "crossed", False)
+    encoder_note = ""
+    if crossed:
+        encoder_src = getattr(args, "encoder_path", None)
+        if encoder_src:
+            encoder_dir = Path(encoder_src)
+            if not encoder_dir.is_dir():
+                raise FileNotFoundError(f"encoder path not found: {encoder_dir}")
+        else:
+            from huggingface_hub import snapshot_download
+
+            encoder_dir = Path(
+                snapshot_download(
+                    "sentence-transformers/all-MiniLM-L6-v2", local_files_only=True
+                )
+            )
+        shutil.copytree(encoder_dir, out / "encoder" / "minilm")
+        inference = {
+            "crossed": True,
+            "encoder_backend": "sentence-transformers",
+            "encoder_path": "encoder/minilm",
+            "distance_threshold": 0.4,
+            "n_clusters": None,
+        }
+        (out / "inference.json").write_text(json.dumps(inference, indent=1), encoding="utf-8")
+        encoder_note = (
+            "\nCrossed inference (D016): this package also ships the MiniLM grouping\n"
+            "encoder (`encoder/minilm`) and `inference.json`. The notebook clusters\n"
+            "test passages into prompt groups and enforces one-per-model assignment.\n"
+            "The encoder is loaded from the attached folder; no download at runtime.\n"
+        )
 
     metadata = {
         "title": f"name-that-llm artifacts ({args.dataset})",
@@ -268,12 +321,74 @@ def cmd_package(args) -> int:
         "Attach this dataset to `kaggle/submission.ipynb` as a notebook input.\n"
         "Contents: fitted models (`models/`), `manifest.json` (class order, run\n"
         "metadata), optional `weights.json` for blending, and `src/` needed to\n"
-        "unpickle the bundles. Generated locally; no competition data included.\n",
+        "unpickle the bundles. Generated locally; no competition data included.\n"
+        + encoder_note,
         encoding="utf-8",
     )
     size_mb = sum(p.stat().st_size for p in out.rglob("*") if p.is_file()) / 1024**2
     print(f"[package] {out} ({size_mb:.1f} MB)")
     print(f"[package] upload with: kaggle datasets create -p {out}")
+    return 0
+
+
+def cmd_stability(args) -> int:
+    """Section 7: re-check the blend gain on alternative seeds + secondary holdout."""
+    from src.stability import run_stability
+
+    cfg = load_config(args.config)
+    train, _test, _truth, label = load_data(args.data_dir, args.synthetic)
+    weights_path = Path(args.weights) if args.weights else (
+        ARTIFACTS_DIR / "cv" / label / "ensemble" / "weights.json"
+    )
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"{weights_path} missing; run the ensemble step first")
+    weights = json.loads(weights_path.read_text(encoding="utf-8")).get("weights", {})
+    out_root = Path(args.out) if args.out else ARTIFACTS_DIR / "stability" / label
+    registry = None if args.no_registry else Path(args.registry)
+    summary = run_stability(
+        train,
+        cfg["models"],
+        weights,
+        seeds=[int(s) for s in args.seeds],
+        out_root=out_root,
+        dataset_label=label,
+        registry_path=registry,
+        holdout_seed=args.holdout_seed,
+        holdout_groups=args.holdout_groups,
+    )
+    for row in summary["seed_stability"]:
+        print(
+            f"[stability] seed {row['seed']}: blend {row['blend_pooled_oof']:.4f} "
+            f"vs best single {row['best_single']['balanced_accuracy']:.4f} "
+            f"gain {row['gain_over_best_single']:+.4f}"
+        )
+    h = summary["holdout"]
+    print(
+        f"[stability] holdout(seed {h['seed']}, {h['n_groups']} prompts): "
+        f"blend {h['blend_balanced_accuracy']:.4f} gain {h['gain_over_best_single']:+.4f}"
+    )
+    print(f"[stability] report: {out_root / 'stability.md'}")
+    return 0
+
+
+def cmd_figures(args) -> int:
+    """Render the Section-9 report figures from saved CV artifacts."""
+    from src.figures import make_report_figures
+
+    artifacts = Path(args.artifacts) if args.artifacts else ARTIFACTS_DIR / "cv" / args.dataset
+    weights_path = Path(args.weights) if args.weights else artifacts / "ensemble" / "weights.json"
+    weights = None
+    if weights_path.is_file():
+        payload = json.loads(weights_path.read_text(encoding="utf-8"))
+        weights = payload.get("weights", payload)
+        print(f"[figures] blend weights from {weights_path}: {weights}")
+    else:
+        print("[figures] no weights.json; using the best single model")
+    out_dir = Path(args.out) if args.out else (
+        FIGURES_DIR if args.dataset == "official" else artifacts / "figures"
+    )
+    for path in make_report_figures(artifacts, out_dir, weights=weights, dataset_label=args.dataset):
+        print(f"[figures] {path}")
     return 0
 
 
@@ -382,6 +497,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--artifacts", default=None)
     p_pred.add_argument("--fit", action="store_true", help="force a refit on all train rows")
     p_pred.add_argument("--out", default=None)
+    p_pred.add_argument(
+        "--crossed", action="store_true",
+        help="cluster test passages into prompt groups and enforce one-per-model assignment (D016)",
+    )
+    p_pred.add_argument(
+        "--distance-threshold", type=float, default=0.4,
+        help="cosine distance threshold for prompt-group clustering (crossed; default 0.4)",
+    )
+    p_pred.add_argument(
+        "--n-clusters", type=int, default=None,
+        help="fixed number of prompt groups; overrides --distance-threshold",
+    )
+    p_pred.add_argument(
+        "--encoder-backend", default="sentence-transformers",
+        choices=["sentence-transformers", "hashing"],
+        help="grouping encoder backend (hashing is hermetic, for smoke tests)",
+    )
+    p_pred.add_argument(
+        "--encoder-path", default=None,
+        help="local MiniLM checkpoint dir for offline grouping (crossed)",
+    )
     p_pred.set_defaults(func=cmd_predict)
 
     p_pkg = sub.add_parser("package", help="build an upload-ready Kaggle dataset folder")
@@ -389,7 +525,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_pkg.add_argument("--dataset", default="official", choices=["official", "synthetic"])
     p_pkg.add_argument("--out", default=None)
     p_pkg.add_argument("--kaggle-user", default="your-kaggle-username")
+    p_pkg.add_argument(
+        "--crossed", action="store_true",
+        help="ship the MiniLM grouping encoder + inference.json for crossed inference (D016)",
+    )
+    p_pkg.add_argument(
+        "--encoder-path", default=None,
+        help="local MiniLM checkpoint dir to ship (default: resolve the HF cache offline)",
+    )
     p_pkg.set_defaults(func=cmd_package)
+
+    p_stab = sub.add_parser("stability", help="blend robustness: alternative seeds + secondary holdout")
+    add_common(p_stab, config=False)
+    p_stab.add_argument("--config", default="configs/submission.yaml")
+    p_stab.add_argument("--seeds", nargs="+", type=int, default=[7, 13])
+    p_stab.add_argument("--weights", default=None)
+    p_stab.add_argument("--out", default=None)
+    p_stab.add_argument("--registry", default=str(DEFAULT_REGISTRY))
+    p_stab.add_argument("--no-registry", action="store_true")
+    p_stab.add_argument("--holdout-seed", type=int, default=7)
+    p_stab.add_argument("--holdout-groups", type=int, default=25)
+    p_stab.set_defaults(func=cmd_stability)
+
+    p_fig = sub.add_parser("figures", help="render report figures from saved CV artifacts")
+    p_fig.add_argument("--artifacts", default=None)
+    p_fig.add_argument("--dataset", default="official", choices=["official", "synthetic"])
+    p_fig.add_argument("--weights", default=None)
+    p_fig.add_argument("--out", default=None)
+    p_fig.set_defaults(func=cmd_figures)
 
     p_demo = sub.add_parser("demo", help="synthetic end-to-end smoke run")
     p_demo.add_argument("--data-dir", default=None)

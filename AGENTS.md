@@ -40,7 +40,8 @@ python -m src.cli audit  --data-dir data             # dataset audit + figures
 python -m src.cli splits --data-dir data             # frozen grouped folds
 python -m src.cli train  --config configs/baseline.yaml --data-dir data
 python -m src.cli ensemble --dataset official
-python -m src.cli predict --config configs/baseline.yaml --data-dir data --fit
+python -m src.cli stability --data-dir data          # blend robustness checks
+python -m src.cli predict --config configs/submission.yaml --data-dir data --fit
 python -m src.cli package --kaggle-user <user>       # upload-ready artifact folder
 make baseline                                        # same as the train step
 ```

@@ -1,0 +1,19 @@
+# Final submission config: exactly the members of the adopted blend (D009).
+# `predict --config configs/submission.yaml --fit` refits these on all labelled
+# rows and blends them with artifacts/cv/official/ensemble/weights.json.
+# Keep in sync with the CV configs: char_tfidf_logreg (baseline.yaml) and
+# style_only (features.yaml). Adding/removing a member here changes the
+# submission and must be re-validated on the registered folds first.
+seed: 42
+
+models:
+  - name: char_tfidf_logreg
+    features: [char]
+    classifier: logreg
+    C: 2.0
+    max_features: 100000
+  - name: style_only
+    features: []
+    style: true
+    classifier: logreg
+    C: 1.0

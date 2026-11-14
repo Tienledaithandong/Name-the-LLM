@@ -17,6 +17,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 
+from src.features_embedding import FrozenEncoder
 from src.features_style import StyleFeatureExtractor
 from src.prompt_invariance import NuisanceSuppressor
 
@@ -80,11 +81,15 @@ class TextMatrixBuilder:
         svd: int | None = None,
         nuisance_k: int = 0,
         nuisance_min_group: int = 4,
+        embedding: dict[str, Any] | None = None,
     ):
         self.kinds = tuple(kinds)
         self.style = bool(style)
-        if not self.kinds and not self.style:
-            raise FeatureError("builder needs at least one tf-idf kind or style features")
+        self.embedding = dict(embedding) if embedding else None
+        if not self.kinds and not self.style and not self.embedding:
+            raise FeatureError(
+                "builder needs at least one tf-idf kind, style features, or an embedding"
+            )
         for kind in self.kinds:
             if kind not in TFIDF_KINDS:
                 raise FeatureError(f"unknown tf-idf kind {kind!r}")
@@ -99,6 +104,8 @@ class TextMatrixBuilder:
         self._style_scaler: StandardScaler | None = None
         self._svd: TruncatedSVD | None = None
         self._suppressor: NuisanceSuppressor | None = None
+        self._encoder: FrozenEncoder | None = None
+        self._embedding_dim: int | None = None
         self._fitted = False
 
     # -- internals ---------------------------------------------------------
@@ -115,10 +122,24 @@ class TextMatrixBuilder:
             block = self._style_scaler.transform(block)
         return sparse.csr_matrix(block, dtype=np.float32)
 
+    def _embedding_block(self, texts) -> sparse.csr_matrix:
+        """Frozen-encoder representation as a sparse block.
+
+        The encoder is pretrained (or a fixed hashing projection fitted on the
+        training fold), so encoding is a function of text alone and carries no
+        label information; encoding train and validation sides separately is
+        therefore leakage-safe.  ``encode_cached`` reuses float16 disk caches.
+        """
+        emb = np.asarray(self._encoder.encode_cached(texts), dtype=np.float32)
+        self._embedding_dim = int(emb.shape[1])
+        return sparse.csr_matrix(emb)
+
     def _raw(self, texts) -> sparse.csr_matrix:
         blocks = [vec.transform(texts) for vec in self._vectorizers]
         if self._style_extractor is not None:
             blocks.append(self._style_block(texts))
+        if self._encoder is not None:
+            blocks.append(self._embedding_block(texts))
         return sparse.hstack(blocks, format="csr").astype(np.float32)
 
     def _reduce(self, matrix: sparse.csr_matrix, groups=None, fit: bool = False):
@@ -150,6 +171,7 @@ class TextMatrixBuilder:
             if self._style_extractor is not None
             else None
         )
+        self._encoder = FrozenEncoder(**self.embedding) if self.embedding else None
         self._svd = (
             TruncatedSVD(
                 n_components=int(self.svd), random_state=0, algorithm="randomized"
@@ -180,6 +202,9 @@ class TextMatrixBuilder:
             names.extend(f"{kind}:{n}" for n in vec.get_feature_names_out())
         if self._style_extractor is not None:
             names.extend(f"style:{n}" for n in self._style_extractor.get_feature_names_out())
+        if self._encoder is not None:
+            dim = self._embedding_dim or int(self.embedding.get("dim", 0))
+            names.extend(f"emb:{i}" for i in range(dim))
         if self._svd is not None:
             return np.asarray([f"svd_{i}" for i in range(self._svd.n_components)], dtype=object)
         return np.asarray(names, dtype=object)

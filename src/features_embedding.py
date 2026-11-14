@@ -86,6 +86,7 @@ class FrozenEncoder:
             self._projection = SparseRandomProjection(
                 n_components=min(self.dim, sparse.shape[1]),
                 random_state=self.seed,
+                dense_output=True,
             )
             self._projection.fit(sparse)
         return np.asarray(self._projection.transform(sparse), dtype=np.float32)

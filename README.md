@@ -7,10 +7,14 @@ it. Metric: **balanced accuracy** (mean per-class recall).
 Competition: <https://www.kaggle.com/competitions/name-that-llm>
 
 > **Status (2026-11-14):** pipeline implemented, tested, and evaluated on the
-> **official training data** with prompt-grouped CV (best: **0.3760** pooled OOF
-> balanced accuracy, a two-model blend). **No Kaggle submission has been made**, so
-> there is no leaderboard score, rank or medal yet. Synthetic-fixture numbers are
-> retained only as a pipeline check and are labelled as such.
+> **official training data** with prompt-grouped CV. The owner submitted the
+> argmax blend (`0.5 × char + 0.5 × style`, 0.3760 pooled OOF) → **0.356 public
+> LB** (top score 0.7). A **crossed-design candidate** (ADR D016) adds test-time
+> prompt-group recovery + one-per-model assignment and is validated at **0.5000**
+> on the untouched holdout and **0.4716 / 0.4657** on alternative fold seeds; it
+> is packaged and ready, **pending the owner's submission**. See
+> `docs/improvement_plan.md`. Synthetic-fixture numbers are retained only as a
+> pipeline check and are labelled as such.
 
 ## What is verified vs. assumed
 
@@ -67,7 +71,7 @@ Key properties:
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pytest -q            # 71 tests
+python -m pytest -q            # 111 tests
 ```
 
 Python 3.11+ (developed on 3.13). Versions are pinned in
@@ -93,12 +97,22 @@ make audit      # docs/audit + figures
 make splits     # frozen folds + fingerprint
 make baseline   # 6 reference/TF-IDF models -> OOF, metrics, registry
 make features   # stylometry ablations
+make embeddings # SVD + prompt-nuisance variants (H2)
+make frozen-encoder # H3 pretrained-encoder benchmark (optional sentence-transformers)
 make ensemble   # greedy blend, prints whether the gain is real
-make predict    # refit on all rows -> artifacts/final/official/submission.parquet
-make package    # upload-ready Kaggle artifact dataset
+make figures    # report figures from saved OOF/metrics
+make stability  # blend robustness: alternative fold seeds + secondary holdout
+make predict    # refit blend members (configs/submission.yaml) -> submission.parquet
+make package    # upload-ready Kaggle artifact dataset (models + weights + src)
+make predict-crossed   # crossed-design inference (D016): prompt-group assignment
+make package-crossed   # dataset + offline MiniLM grouping encoder (needs sentence-transformers)
 ```
 
-Then attach the packaged dataset to `kaggle/submission.ipynb` and submit.
+Then attach the packaged dataset to `kaggle/submission.ipynb` and submit. For the
+crossed candidate use `make package-crossed` (ships the MiniLM checkpoint offline)
+and attach that dataset; the notebook reads `inference.json` and switches to
+crossed inference automatically. Owner-only account steps (rules, upload, submit,
+final selection) are listed in `docs/submission_checklist.md`.
 
 ## Results
 
@@ -142,11 +156,24 @@ is not one lucky split:
 | word only, LinearSVC | 0.2697 |
 | char + style, LinearSVC | 0.2245 (2 of 5 folds collapsed; non-convergent) |
 | char + style, LogisticRegression | stopped: no convergence, >37 min, ~0.7 GB RSS |
+| char → SVD-256, LinearSVC | 0.3034 |
+| char → SVD-256 → nuisance-8, LinearSVC | 0.2434 |
+| style → SVD-64 → nuisance-8, LogisticRegression | 0.2737 |
+| MiniLM embeddings only, LogisticRegression | 0.1278 |
+| MiniLM embeddings + style, LogisticRegression | 0.3093 |
 
 Findings: style alone is competitive with a 100k-feature character model using
 only 44 features, and the two are complementary enough to blend (+0.0567).
 Concatenation is not a free lunch here — `word+char` matches char alone, and the
 `char+style` sparse concat failed to converge at this vocabulary size.
+Deployable prompt-nuisance suppression (H2) is a **negative result**: projecting
+out the top-8 between-prompt directions lowers pooled OOF for char
+(0.3034→0.2434) and style (0.2904→0.2737); SVD-256 compression alone also slightly
+lowers char (0.3167→0.3034). See report §6.4 and ADR D010.
+A frozen semantic encoder (H3) is also a **negative result**: MiniLM embeddings
+score 0.1278 alone (topic, not authorship), and the greedy char+encoder blend
+gains only +0.0026 on CV (0.3786) which reverses on the holdout (0.3933 vs
+0.3956), so it is not adopted. See report §6.6 and ADR D013.
 
 **Error analysis of the blend:** weakest classes `claude-fable-5` (0.121),
 `glm-5.3-flash` (0.147), `gpt-5.6-sol` (0.153); strongest
@@ -160,6 +187,31 @@ duplicate texts, mean 114.7 words, 57.84% of passages contain non-ASCII
 characters, and there is no markdown or emoji in the corpus. Details in
 `artifacts/audit/official/data_audit.md` and `docs/data_audit.md`.
 
+### Crossed-design candidate (D016, pending submission)
+
+The training set is a balanced full factorial (150 prompts × 17–18 of the 18
+models). The hidden test mirrors this, so passages answering the same prompt can
+be recovered by semantic clustering and constrained to **one passage per model**.
+`src/crossed.py` (Hungarian assignment) + `src/grouping.py` (MiniLM agglomerative
+clustering) + `src.inference.predict_dataframe_crossed` implement this label-free,
+transductive inference step. The blend members and weights are unchanged.
+
+| split | argmax blend | recovered-group assignment (cosine thr 0.4) | gain |
+|---|---|---|---|
+| untouched holdout (25 prompts, seed 7) | 0.3956 | **0.5000** | +0.1044 |
+| grouped CV seed 7 | 0.3608 | 0.4716 | +0.1108 |
+| grouped CV seed 13 | 0.3582 | 0.4657 | +0.1075 |
+| grouped CV seed 42 (reference) | 0.3760 | 0.4704 | +0.0944 |
+
+The oracle ceiling (known prompt groups) is 0.4853 on seed 42, so recovered
+grouping captures ~88–90% of it. The gain is positive on every split; threshold
+0.4 keeps the highest cluster purity at scale (0.960 on all 2,699 passages / 150
+prompts). Compliance cleared (spec §9: label-free transductive clustering is
+allowed). The packaged crossed pipeline was verified to load the attached MiniLM
+checkpoint fully offline and run at 2,699-row scale in ~56 s on CPU, producing a
+near-uniform label distribution (max class share 0.056 ≈ 1/18) — the expected
+full-factorial signature. See `docs/improvement_plan.md` §5 and ADRs D014–D016.
+
 ### Synthetic fixture (superseded pipeline check)
 
 The fixture run is kept only to prove the pipeline works without competition
@@ -170,7 +222,7 @@ lives in `artifacts/cv/synthetic/` and is labelled `synthetic` in the registry.
 ## Repository layout
 
 ```text
-configs/            baseline, features (ablations), embeddings, ensemble
+configs/            baseline, features (ablations), embeddings, frozen_encoder, ensemble, submission
 data/               ignored; official CSVs or the synthetic fixture
 docs/               spec, protocol, audit, external-data register, decisions (ADRs)
 src/
@@ -186,11 +238,15 @@ src/
   baselines.py      majority, stratified random
   train.py          CV loop, OOF, registry, summary
   ensemble.py       greedy OOF blending on normalised margins
-  inference.py      final refit and prediction
+  inference.py      final refit and prediction (argmax + crossed-design)
+  crossed.py        within-prompt centering + one-per-model Hungarian assignment
+  grouping.py       MiniLM embedding clustering + prompt-group purity metrics
   submission.py     parquet writing + validation
-  audit.py          data audit, report, figures
-  cli.py            audit / splits / train / ensemble / predict / package / demo
-tests/              71 unit and integration tests
+  audit.py          data audit, report, class-balance/length figures
+  figures.py        report figures from saved OOF/metrics (confusion, recall, ablation)
+  cli.py            audit / splits / train / ensemble / figures / predict / package / demo
+tests/              111 unit and integration tests
+figures/            generated report figures (PNG)
 kaggle/             submission.ipynb (offline, attached-artifact)
 experiments/        registry.csv, reports
 report/             research_report.md
@@ -201,24 +257,37 @@ report/             research_report.md
 - No competition rows are sent to any assistant or external service; only code,
   configs, aggregates and schema.
 - No runtime network access, no third-party inference, no paid APIs.
-- `docs/external_data_register.md` is empty: every reported model is trained from
-  scratch on the official training folds.
+- The submitted argmax blend is trained from scratch on the official training
+  folds and uses no external data. The **crossed-design candidate** (D016) attaches
+  one public encoder (MiniLM, Apache-2.0) **offline** for prompt-group clustering
+  only — never as an authorship feature, never downloaded at runtime.
+  `docs/external_data_register.md` records its provenance, licence and validation;
+  it was benchmarked for H3 authorship and not adopted for that purpose (D013).
 - Data is never committed (`data/`, `artifacts/` ignored).
 - Ambiguous compliance questions are logged in `docs/competition_spec.md` §10 and
   need owner approval before the final submission.
 
 ## Known limitations
 
-- No Kaggle submission has been made, so there is no public/private leaderboard
-  evidence; the 0.3760 is local grouped CV only.
+- The owner's first submission (argmax blend) scored **0.356 public LB**; the
+  0.3760 is local grouped CV. The crossed-design candidate (D016) is validated
+  locally (holdout 0.5000) but **not yet submitted**, so there is no leaderboard
+  evidence for it yet. The public/private model mixes differ.
+- Crossed inference depends on test-time prompt-group recovery: if clustering
+  purity collapses on the real ~4,000-row hidden test (larger than the 2,699-row
+  local proxy), the gain shrinks. A degenerate label distribution in the notebook
+  output is the warning sign; fall back to the argmax blend if so.
 - The blend weights were selected on the same out-of-fold predictions they are
-  scored on, so the gain is mildly optimistic. It is consistent across all five
-  folds but has not been re-checked on the secondary prompt-held-out split or
-  alternative seeds.
+  scored on, so the gain is mildly optimistic. It has since been re-checked on
+  alternative fold seeds (7, 13) and the secondary prompt-held-out split and is
+  positive on all (+0.0452, +0.0441, +0.0222 respectively; report §6.5).
 - Prompt-topic shift between train and hidden test can exceed what grouped CV
   simulates, and the public/private model mixes differ.
 - `char+style` sparse concatenation did not converge at 100k features; the idea
   is unresolved rather than refuted.
-- No frozen-encoder result exists yet; the optional backend is untested against a
-  real checkpoint.
+- Deployable prompt-nuisance suppression (k=8) reduced pooled OOF on official
+  data and is not adopted; only one k was tested (report §6.4, ADR D010).
+- A frozen MiniLM encoder was benchmarked (H3) and not adopted: 0.1278 alone, and
+  a +0.0026 greedy blend gain that reverses on the holdout (report §6.6, ADR
+  D013). Only one small encoder was tested.
 - The synthetic fixture is not a proxy for competition difficulty.

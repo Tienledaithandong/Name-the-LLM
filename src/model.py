@@ -31,6 +31,7 @@ class ModelSpec:
     min_df: int | None = None
     svd: int | None = None
     nuisance_k: int = 0
+    embedding: dict[str, Any] | None = None
     class_weight: str | None = "balanced"
     seed: int = 42
     params: dict[str, Any] = field(default_factory=dict)
@@ -65,6 +66,7 @@ class ModelSpec:
             "min_df": self.min_df,
             "svd": self.svd,
             "nuisance_k": self.nuisance_k,
+            "embedding": self.embedding,
             "class_weight": self.class_weight,
             "params": self.params,
         }
@@ -125,6 +127,7 @@ class ModelBundle:
             params=builder_params,
             svd=spec.svd,
             nuisance_k=spec.nuisance_k,
+            embedding=spec.embedding,
         )
         self.classifier = classifier or build_classifier(spec)
 

@@ -10,8 +10,10 @@ import numpy as np
 import pandas as pd
 
 from src.constants import LABELS, N_CLASSES, RANDOM_STATE
+from src.crossed import assign_one_per_model
 from src.data import dataset_fingerprint, labels_to_indices
 from src.ensemble import normalize_scores
+from src.grouping import cluster_embeddings
 from src.model import ModelError, estimator_from_config
 from src.repro import env_snapshot, git_commit
 
@@ -89,16 +91,14 @@ def load_weights(path: str | Path | None) -> dict[str, float] | None:
     return weights
 
 
-def predict_dataframe(
+def blend_score_matrix(
     bundles: dict,
-    test_df: pd.DataFrame,
+    texts: list[str],
     weights: dict[str, float] | None = None,
 ) -> np.ndarray:
-    """Predict labels for ``test_df``; blends normalised margins if >1 model."""
+    """Row-normalised blend margins (n_rows x N_CLASSES); not probabilities."""
     if not bundles:
         raise ValueError("no fitted models")
-    texts = test_df["text"].astype(str).tolist()
-
     if weights:
         missing = set(weights) - set(bundles)
         if missing:
@@ -114,7 +114,50 @@ def predict_dataframe(
         scores = normalize_scores(bundles[name].decision_function(texts))
         block = scores * weight
         total = block if total is None else total + block
-    indices = np.asarray(total).argmax(axis=1)
+    return np.asarray(total)
+
+
+def predict_dataframe(
+    bundles: dict,
+    test_df: pd.DataFrame,
+    weights: dict[str, float] | None = None,
+) -> np.ndarray:
+    """Predict labels for ``test_df``; blends normalised margins if >1 model."""
+    texts = test_df["text"].astype(str).tolist()
+    indices = blend_score_matrix(bundles, texts, weights).argmax(axis=1)
+    return np.asarray([LABELS[int(i)] for i in indices], dtype=object)
+
+
+def predict_dataframe_crossed(
+    bundles: dict,
+    test_df: pd.DataFrame,
+    weights: dict[str, float] | None = None,
+    encoder=None,
+    distance_threshold: float | None = 0.4,
+    n_clusters: int | None = None,
+    models_per_prompt: int = 18,
+) -> np.ndarray:
+    """Crossed-design prediction: cluster passages into prompt groups, then
+    enforce one-passage-per-model assignment within each recovered group.
+
+    Label-free and transductive (uses only test text).  ``encoder`` embeds the
+    passages for clustering; provide exactly one of ``n_clusters`` or
+    ``distance_threshold`` (default cosine 0.4).  When neither is given, the
+    group count is estimated as ``n_rows / models_per_prompt``.
+    """
+    if encoder is None:
+        raise ValueError("crossed prediction requires an encoder for grouping")
+    texts = test_df["text"].astype(str).tolist()
+    scores = blend_score_matrix(bundles, texts, weights)
+    emb = np.asarray(encoder.encode(texts), dtype=np.float32)
+    if n_clusters is not None:
+        distance_threshold = None
+    elif distance_threshold is None:
+        n_clusters = max(2, int(round(len(texts) / models_per_prompt)))
+    labels = cluster_embeddings(
+        emb, n_clusters=n_clusters, distance_threshold=distance_threshold
+    )
+    indices = assign_one_per_model(scores, labels)
     return np.asarray([LABELS[int(i)] for i in indices], dtype=object)
 
 

@@ -35,9 +35,12 @@ models:
     features: [word, char]
     classifier: linearsvc
     max_features: 100000
-  - name: char_plus_style_logreg
-    features: [char]
-    style: true
-    classifier: logreg
-    C: 2.0
-    max_features: 100000
+  # char_plus_style_logreg is excluded: on official data it failed to converge
+  # after 2,000 lbfgs iterations (>37 min, ~0.7 GB RSS) and was stopped. Re-add
+  # only with a solver/iteration budget that demonstrably converges.
+  # - name: char_plus_style_logreg
+  #   features: [char]
+  #   style: true
+  #   classifier: logreg
+  #   C: 2.0
+  #   max_features: 100000

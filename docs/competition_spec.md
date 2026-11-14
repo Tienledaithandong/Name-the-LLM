@@ -119,7 +119,9 @@ explicitly bounded by, the verified rules.
 
 ## 10. Still unverified (blocking final submission only)
 
-- [ ] Whether the interactive test file has 1 or 3 rows (code is agnostic).
+- [x] Interactive test-file row count: the downloaded `test.csv` has **3 rows**,
+      matching the Data page; the Overview's "single example row" wording is the
+      outlier. The code remains agnostic to the count.
 - [ ] Exact public/private split ratio of the hidden test set (not published on
       the pages above).
 - [ ] Whether any GPU quota applies beyond the 9-hour runtime limit (the page

@@ -2,10 +2,10 @@
 
 **Technical report — draft, 2026-11-14. Not a peer-reviewed publication.**
 
-**Status:** methods implemented and tested; competition-data results **pending**
-data access. The quantitative section below reports a synthetic-fixture
-validation of the pipeline and is labelled as such everywhere it appears. No
-Kaggle score, rank or medal exists yet.
+**Status:** methods implemented, tested and evaluated on the official training
+data with prompt-grouped CV. No leaderboard submission has been made, so no
+Kaggle score, rank or medal exists yet. The synthetic-fixture numbers are kept
+only as a pipeline-validation baseline.
 
 ---
 
@@ -22,8 +22,13 @@ training prompts only, and distinguish it from the non-deployable
 prompt-centring diagnostic. On a synthetic fixture built to mimic the schema and
 style structure, the pipeline runs end-to-end on CPU in about two minutes and the
 sparse baselines score 0.095–0.234 pooled out-of-fold balanced accuracy against
-0.051–0.054 for reference baselines, while stylometric models reach 0.472–0.482;
-these are pipeline-validation numbers, not competition results.
+0.051–0.054 for reference baselines, while stylometric models reach 0.472–0.482
+on the fixture. On the official training data (2,699 passages, 150 prompts, five
+prompt-grouped folds) character TF-IDF reaches 0.3193 and stylometry alone
+0.2904; blending the two gives **0.3760** pooled out-of-fold balanced accuracy
+(+0.0567 over the best single model, positive in all five folds). Errors
+concentrate within providers (53.3% of errors), with sibling flash models the
+most confused pair.
 
 ## 1. Introduction
 
@@ -66,6 +71,12 @@ unseen prompts and ~4,000 rows in the graded rerun; submissions are
 pretrained models are permitted if publicly accessible. Competition data is
 CC BY-SA 4.0 and is not redistributed here.
 
+The audit (`docs/data_audit.md`, dataset fingerprint `6368e9c31e8d060f`) found
+149–150 passages per model, 17–18 models per prompt (a near-complete factorial
+design), no duplicate ids or texts, mean 114.7 words (p05–p95: 44–224), 57.84% of
+passages containing non-ASCII characters, and no markdown or emoji anywhere. The
+downloaded `test.csv` has three example rows.
+
 ## 4. Experimental protocol
 
 - Primary split: `StratifiedGroupKFold(5, shuffle=True, random_state=42)` on
@@ -85,8 +96,8 @@ CC BY-SA 4.0 and is not redistributed here.
 
 **Sparse text models.** Character (2–5), `char_wb` and word (1–2) TF-IDF with
 capped vocabularies, sublinear TF, float32, paired with LinearSVC
-(`class_weight='balanced'`) or logistic regression. Margances are used directly;
-they are never treated as probabilities.
+(`class_weight='balanced'`) or logistic regression. Margins are used directly and
+treated as ordinal scores, not probabilities.
 
 **Stylometry.** 44 deterministic features covering length, punctuation, formatting
 (markdown, bullets, code fences, digits), Unicode composition, lexical diversity,
@@ -114,13 +125,39 @@ by at least the configured margin.
 
 ## 6. Results
 
-### 6.1 Competition data
+### 6.1 Official training data (primary result)
 
-**Not yet measured.** The official files require accepting the competition rules
-on Kaggle, which is an owner-only account action. No number in this report should
-be read as a competition CV score.
+Five prompt-grouped folds (1,200–1,400 held-out passages and 30 held-out prompts
+per fold, zero prompt overlap), pooled out-of-fold balanced accuracy:
 
-### 6.2 Pipeline validation on the synthetic fixture
+| model | pooled OOF | fold mean ± std | macro F1 | fit s (5 folds) |
+|---|---|---|---|---|
+| char TF-IDF + LogisticRegression | 0.3193 | 0.3193 ± 0.0119 | 0.3089 | 80.6 |
+| char TF-IDF + LinearSVC | 0.3167 | 0.3167 ± 0.0134 | 0.3049 | 75.2 |
+| word + char TF-IDF + LinearSVC | 0.3156 | 0.3156 ± 0.0094 | 0.3025 | 73.5 |
+| `char_wb` TF-IDF + LinearSVC | 0.2963 | 0.2963 ± 0.0101 | 0.2877 | 49.6 |
+| style only + LogisticRegression | 0.2904 | 0.2904 ± 0.0142 | 0.2792 | 29.6 |
+| word TF-IDF + LinearSVC | 0.2697 | 0.2697 ± 0.0115 | 0.2539 | 7.5 |
+| char + style TF-IDF + LinearSVC (unstable) | 0.2245 | 0.2244 ± 0.0849 | 0.2254 | 1213.8 |
+| majority class | 0.0556 | 0.0556 ± 0.0000 | 0.1053 | 0.0 |
+| stratified random | 0.0545 | 0.0545 ± 0.0047 | 0.0534 | 0.0 |
+
+**Current best: a two-model blend.** Greedy OOF selection chose 0.5 × char
+TF-IDF logistic regression + 0.5 × style-only logistic regression, scoring
+**0.3760** pooled OOF versus 0.3193 for the best single model (+0.0567). The
+gain is present in every fold: +0.0630, +0.0352, +0.0741, +0.0519, +0.0593. The
+members are genuinely complementary — sparse character n-grams and 44 explicit
+style statistics — which is exactly the diversity the blend needs.
+
+The `char + style` LinearSVC row is reported but **not interpreted as evidence
+about the representation**: two folds collapsed (0.0944, 0.1648) and liblinear
+reported convergence failures, so its mean reflects an optimisation failure. The
+logistic-regression version of char+style was stopped before completion (no
+convergence after 2,000 iterations, >37 minutes, ~700 MB RSS) and is excluded
+from `configs/features.yaml`; on the fixture it was the best model, which is why
+the concat idea is not abandoned, only unproven here.
+
+### 6.2 Pipeline validation on the synthetic fixture (superseded)
 
 The fixture (`src/synthetic.py`) generates 18 models with probabilistic style
 profiles (sentence length, punctuation, markdown, hedging) over shared topical
@@ -154,56 +191,87 @@ its job, and it motivates H1/H2 rather than settling them.
 
 | hypothesis | status |
 |---|---|
-| H1: character/typography features generalise better across prompts than semantic word features | **unsupported on the fixture** (word worse than char, but char near chance while style is far ahead — fixture-specific) |
-| H2: prompt-invariance techniques improve grouped validation | **not yet measured** (`configs/embeddings.yaml` defines the comparison; requires official data to matter) |
+| H1: character/typography features generalise better across prompts than semantic word features | **partially supported on official data**: char 0.3167 vs word 0.2697 (+0.047), and `char_wb` 0.2963 also beats word. Style alone (0.2904) is close to char. |
+| H2: prompt-invariance techniques improve grouped validation | **not yet measured** (`configs/embeddings.yaml` defines the SVD + nuisance-suppression comparison; not yet run on official data) |
 | H3: frozen encoders complement sparse stylometry | **not yet measured**; optional backend implemented, no checkpoint benchmarked |
-| H4: within-provider confusions dominate | **not yet measured**; diagnostic implemented (`metrics.within_provider_confusions`) |
+| H4: within-provider confusions dominate | **supported**: 897 of 1,684 blend errors stay inside a provider (53.3%), and the top confusion pairs are siblings (`gemini-3.8-flash`→`gemini-3.7-flash` 56, `gemini-3.6-flash`→`gemini-3.7-flash` 40, `glm-5.3-flash`↔`glm-5.3` 35+). |
 
 ## 7. Ablations
 
-`configs/features.yaml` on the fixture's five registered folds (1,671 rows):
+Official data, same five registered folds (2,699 rows):
 
 | ablation | pooled OOF | fold mean ± std | fit s (5 folds) | peak RSS |
 |---|---|---|---|---|
-| char + style, LogisticRegression | **0.4823** | 0.4832 ± 0.0283 | 364.7 | 0.18 GB |
-| style only, LogisticRegression | 0.4723 | 0.4732 ± 0.0322 | 22.8 | 0.18 GB |
-| char + style, LinearSVC | 0.3650 | 0.3662 ± 0.0294 | 425.7 | 0.18 GB |
-| char only, LinearSVC | 0.2061 | 0.2059 ± 0.0110 | 45.8 | 0.18 GB |
-| word + char, LinearSVC | 0.1674 | 0.1675 ± 0.0191 | 53.3 | 0.18 GB |
-| word only, LinearSVC | 0.0951 | 0.0945 ± 0.0144 | 5.3 | 0.18 GB |
+| char only, LinearSVC | **0.3167** | 0.3167 ± 0.0134 | 75.2 | 0.21 GB |
+| word only, LinearSVC | 0.2697 | 0.2697 ± 0.0115 | 7.5 | 0.20 GB |
+| style only, LogisticRegression | 0.2904 | 0.2904 ± 0.0142 | 29.6 | 0.20 GB |
+| word + char, LinearSVC | 0.3156 | 0.3156 ± 0.0094 | 73.5 | 0.22 GB |
+| char + style, LinearSVC | 0.2245 (unstable) | 0.2244 ± 0.0849 | 1213.8 | 0.21 GB |
+| char + style, LogisticRegression | not completed | — | >37 min | ~0.7 GB |
 
-(Stylometry on this fixture is deliberately over-represented because the
-synthetic profiles are generated from punctuation and formatting habits. The
-official-data ablation is the one that matters and is still pending. Exact
-per-fold scores, timings and RSS for every row are in `experiments/registry.csv`
-and `artifacts/cv/synthetic/metrics/*.json`.)
+Interpretation:
 
-Interpretation on the fixture: character n-grams capture topical content shared
-across models and generalise poorly across prompts; explicit style features carry
-the signal. `word + char` is worse than char alone — concatenating sparse blocks
-adds dimensionality without adding transferable signal at this sample size. This
-supports measuring H1 on real data but does not settle it: the fixture's style
-profiles are not real model fingerprints.
+- **Style alone is competitive** (0.2904) with a 100k-feature character model
+  (0.3167) using only 44 features, and it is *different*: blending the two gains
+  +0.0567, the only validated improvement in this report.
+- **Concatenation is not a free lunch.** `word + char` matches char alone
+  (0.3156 vs 0.3167, inside fold noise) despite doubling feature count.
+  `char + style` LinearSVC collapsed on two folds and hit liblinear's iteration
+  cap; that is an optimisation failure, not evidence against the representation,
+  but it does mean the naive concat is unusable as configured.
+- **Style is not a majority-class shortcut.** Every model beats the majority
+  baseline 0.0556 by a wide margin, and `class_weight='balanced'` plus the
+  near-uniform support rule out trivial class priors.
+
+The earlier fixture ablation (char+style logreg 0.4823 best) is misleading
+because fixture styles are generated from punctuation/formatting habits; it is
+retained in `artifacts/cv/synthetic/` and the registry labelled `synthetic`
+precisely so it is not mistaken for real evidence.
 
 ## 8. Error analysis
 
-Implemented and ready: per-class recall, confusion matrices, within- vs
-cross-provider error split, and per-length-band performance. Official-data
-confusion analysis is pending; on sibling models (`gpt-5.6-*`, `claude-opus-4-6`
-vs `-4-8`) it is the analysis we expect to matter most.
+For the adopted blend (pooled OOF, 2,699 predictions):
+
+- **Weakest classes:** `claude-fable-5` 0.121, `glm-5.3-flash` 0.147,
+  `gpt-5.6-sol` 0.153, `glm-5.3` 0.167, `gpt-5.6-terra` 0.220.
+- **Strongest classes:** `gemini-3.1-pro-preview` 0.733, `claude-opus-5` 0.707,
+  `gpt-6-astra` 0.560, `claude-opus-4-6` 0.540.
+- **Within-provider errors dominate:** 897 of 1,684 errors (53.3%) stay inside a
+  provider, versus 787 cross-provider. Top confusion pairs are sibling models:
+  `gemini-3.8-flash`→`gemini-3.7-flash` (56), `gemini-3.6-flash`→`gemini-3.7-flash`
+  (40), `gemini-3.7-flash`→`gemini-3.8-flash` (37), `glm-5.3`→`claude-opus-5`
+  (36), `gpt-5.6-terra`→`gpt-5.6-luna` (35), `glm-5.3-flash`→`glm-5.3` (35).
+- This supports H4: version-level distinctions within a provider are the hard
+  part, and provider-level features are already largely captured.
+
+Per-class recall, the full 18×18 confusion matrix and the within/cross split are
+recomputed by `src.metrics` from the saved OOF matrices; length-band analysis is
+wired into the audit but has not yet been run on the blend.
 
 ## 9. Efficiency
 
-Sparse models: ~3–44 s to fit five folds on 1.7k passages, <0.3 GB peak RSS,
-sub-second to 3 s inference per fold on CPU. The graded notebook budget is 9 hours
-CPU and ~4,000 test passages; the measured cost leaves orders of magnitude of
-headroom, but the official-size benchmark has not been run.
+Official data: 7.5–80.6 s to fit all five folds for the sparse models, 0.20–0.22
+GB peak RSS, 0.4–5.9 s total inference per five folds on CPU. The char+style
+concatenation is the outlier at 1,213.8 s for five folds with a convergence
+failure. The graded notebook budget is 9 hours CPU, so the adopted blend (one
+char model plus one 44-feature model) has several orders of magnitude of
+headroom; a full refit on 2,699 rows plus prediction on ~4,000 test passages is
+~2 minutes of fitting plus seconds of inference. These are local-machine
+measurements, not a Kaggle notebook benchmark.
 
 ## 10. Limitations and threats to validity
 
 - Synthetic-fixture numbers are a plumbing check, not a performance estimate.
 - 150 training prompts and 2,699 rows make fold estimates noisy; one lucky fold is
-  not evidence, which is why pooled OOF and fold spread are both reported.
+  not evidence, which is why pooled OOF and fold spread are both reported. The
+  blend gain is positive in all five folds, but it was *selected* on the same OOF
+  predictions, so it is mildly optimistic.
+- No submission has been made, so no public/private leaderboard evidence exists.
+- Some configurations failed to converge within the iteration budget
+  (`char + style` LinearSVC, `char + style` logistic regression). Their numbers
+  are reported as failures, not silently dropped.
+- No repeated-seed stability check has been run yet; the secondary prompt-held-out
+  split exists in the harness but is unused so far.
 - Prompt-topic shift between train and hidden test can exceed what grouped CV
   simulates; the public/private mix differs.
 - Nuisance suppression assumes prompt centroids estimated from ≥4 training rows

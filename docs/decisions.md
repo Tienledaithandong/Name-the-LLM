@@ -79,3 +79,29 @@ iterations were not buying convergence.
 
 Reopen if: official-data ablations show a large-capacity model is better; raise
 the caps deliberately and record the runtime.
+
+## D009 — First official CV result and the adopted blend (2026-11-14)
+
+Official data was downloaded with the owner's existing Kaggle credentials
+(`python -m kaggle competitions download -c name-that-llm -p data --unzip`).
+Audit: 2,699 rows, 150 prompts, 18/18 classes at 149–150 rows each, no duplicate
+texts, 114.7 mean words, no markdown or emoji.
+
+Registered grouped CV (5 folds, 30 held-out prompts each): best single model is
+char TF-IDF + logistic regression at 0.3193; style-only reaches 0.2904 with 44
+features. Greedy blending selects 0.5/0.5 of those two and scores **0.3760**,
++0.0567 over the best single, positive in all five folds. That blend is the
+adopted candidate for the first submission.
+
+`char + style` sparse concatenation did not converge: LinearSVC collapsed on two
+folds (fold scores 0.094/0.165 vs ~0.31 elsewhere, 1,214 s for five folds) and
+the logistic-regression variant was stopped after >37 min and ~0.7 GB RSS. It is
+excluded from `configs/features.yaml` with a comment; the concatenation idea is
+unresolved, not refuted.
+
+Known caveat: blend weights were selected on the same OOF predictions used to
+score them. Before the final submission, confirm on the secondary prompt-held-out
+split and one alternative fold seed.
+
+Reopen if: the secondary holdout or an alternative seed does not reproduce the
+gain, in which case submit the best single model instead.

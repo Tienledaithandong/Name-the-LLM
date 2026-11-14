@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from src.constants import LABELS, N_CLASSES
+from src.data import labels_to_indices
+from src.model import ModelBundle, ModelError, ModelSpec, build_classifier, estimator_from_config
+
+
+def test_spec_validation():
+    with pytest.raises(ModelError, match="needs a name"):
+        ModelSpec.from_dict({"features": ["char"]})
+    with pytest.raises(ModelError, match="unknown classifier"):
+        ModelSpec.from_dict({"name": "x", "classifier": "magic"})
+    with pytest.raises(ModelError, match="requires an svd"):
+        ModelSpec.from_dict({"name": "x", "nuisance_k": 3})
+    spec = ModelSpec.from_dict({"name": "x", "features": ["char"], "char_ngram_range": [3, 4]})
+    assert spec.features == ("char",)
+    assert spec.params["char_ngram_range"] == [3, 4]
+    assert spec.to_dict()["name"] == "x"
+
+
+def test_classifier_factory_rejects_unknown():
+    spec = ModelSpec(name="x")
+    spec.classifier = "nope"
+    with pytest.raises(ModelError, match="unknown classifier"):
+        build_classifier(spec)
+
+
+def test_estimator_from_config_baselines_and_models():
+    from src.baselines import MajorityClassifier, StratifiedRandomClassifier
+
+    assert isinstance(estimator_from_config({"name": "m", "baseline": "majority"}), MajorityClassifier)
+    assert isinstance(
+        estimator_from_config({"name": "r", "baseline": "stratified_random"}),
+        StratifiedRandomClassifier,
+    )
+    assert isinstance(estimator_from_config({"name": "c", "features": ["char"]}), ModelBundle)
+    with pytest.raises(ModelError, match="unknown baseline"):
+        estimator_from_config({"name": "b", "baseline": "nonsense"})
+
+
+def test_bundle_scores_align_with_official_class_order(train_df, tiny_char_model, tmp_path):
+    subset = train_df.groupby("model", observed=True).head(4).reset_index(drop=True)
+    bundle = estimator_from_config(tiny_char_model, seed=0)
+    bundle.fit(subset["text"].tolist(), labels_to_indices(subset["model"].tolist()))
+
+    scores = bundle.decision_function(subset["text"].head(7).tolist())
+    assert scores.shape == (7, N_CLASSES)
+    assert bundle.class_order == LABELS
+    assert set(bundle.predict(subset["text"].head(7).tolist())) <= set(LABELS)
+
+    path = bundle.save(tmp_path / "bundle.joblib")
+    reloaded = ModelBundle.load(path)
+    assert np.allclose(scores, reloaded.decision_function(subset["text"].head(7).tolist()))
+    assert reloaded.class_order == LABELS
+
+
+def test_bundle_rejects_out_of_range_labels(train_df, tiny_char_model):
+    bundle = estimator_from_config(tiny_char_model, seed=0)
+    with pytest.raises(ModelError, match="class indices"):
+        bundle.fit(train_df["text"].head(5).tolist(), np.array([0, 1, 2, 3, 99]))
+
+
+def test_class_order_mismatch_is_rejected_on_load(train_df, tiny_char_model, tmp_path):
+    subset = train_df.groupby("model", observed=True).head(4).reset_index(drop=True)
+    bundle = estimator_from_config(tiny_char_model, seed=0)
+    bundle.fit(subset["text"].tolist(), labels_to_indices(subset["model"].tolist()))
+    bundle.class_order = tuple(reversed(LABELS))
+    path = bundle.save(tmp_path / "bad.joblib")
+    with pytest.raises(ModelError, match="class order"):
+        ModelBundle.load(path)
+
+
+def test_majority_baseline_predicts_a_valid_label(train_df):
+    bundle = estimator_from_config({"name": "maj", "baseline": "majority"})
+    bundle.fit(train_df["text"].tolist(), labels_to_indices(train_df["model"].tolist()))
+    predictions = set(bundle.predict(["anything at all"]))
+    assert len(predictions) == 1
+    assert predictions <= set(LABELS)

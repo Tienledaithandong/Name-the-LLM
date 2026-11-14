@@ -1,0 +1,43 @@
+# Section 4 ablations: word / char / style / combinations.
+# Every entry uses the same registered folds as baseline.yaml.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+features:
+  max_features: 200000
+  min_df: 2
+  sublinear_tf: true
+
+models:
+  - name: char_only
+    features: [char]
+    classifier: linearsvc
+    max_features: 200000
+  - name: word_only
+    features: [word]
+    classifier: linearsvc
+    max_features: 150000
+  - name: style_only
+    features: []
+    style: true
+    classifier: logreg
+    C: 1.0
+  - name: char_plus_style
+    features: [char]
+    style: true
+    classifier: linearsvc
+    max_features: 200000
+  - name: word_plus_char
+    features: [word, char]
+    classifier: linearsvc
+    max_features: 200000
+  - name: char_plus_style_logreg
+    features: [char]
+    style: true
+    classifier: logreg
+    C: 2.0
+    max_features: 150000

@@ -1,0 +1,31 @@
+# Competition data (never commit; upload rules + CC BY-SA terms apply)
+data/*
+!data/.gitkeep
+
+# Fitted models, OOF scores, submissions, caches
+artifacts/
+cache/
+*.joblib
+*.pkl
+*.npz
+
+# Notebook / Python debris
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# Large generated output
+figures/*
+!figures/.gitkeep
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

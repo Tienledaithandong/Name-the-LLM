@@ -1,0 +1,40 @@
+# Section 3 baselines. Fixed folds only; no tuning on the secondary holdout.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+features:
+  max_features: 200000
+  min_df: 2
+  sublinear_tf: true
+  char_ngram_range: [2, 5]
+  word_ngram_range: [1, 2]
+
+models:
+  - name: majority
+    baseline: majority
+  - name: stratified_random
+    baseline: stratified_random
+  - name: char_tfidf_linearsvc
+    features: [char]
+    classifier: linearsvc
+    C: 1.0
+    max_features: 200000
+  - name: word_tfidf_linearsvc
+    features: [word]
+    classifier: linearsvc
+    C: 1.0
+    max_features: 150000
+  - name: char_wb_tfidf_linearsvc
+    features: [char_wb]
+    classifier: linearsvc
+    C: 1.0
+    max_features: 200000
+  - name: char_tfidf_logreg
+    features: [char]
+    classifier: logreg
+    C: 2.0
+    max_features: 150000

@@ -1,0 +1,31 @@
+# Section 6: compact dense representations as a diversity source.
+# svd+nuisance is deployable (fit on training prompts only); the
+# prompt-centring diagnostic is NOT included here because it needs test prompts.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+models:
+  - name: char_svd256_linearsvc
+    features: [char]
+    svd: 256
+    classifier: linearsvc
+    C: 1.0
+    max_features: 200000
+  - name: char_svd256_nuisance8
+    features: [char]
+    svd: 256
+    nuisance_k: 8
+    classifier: linearsvc
+    C: 1.0
+    max_features: 200000
+  - name: style_svd64_nuisance8
+    features: []
+    style: true
+    svd: 64
+    nuisance_k: 8
+    classifier: logreg
+    C: 1.0

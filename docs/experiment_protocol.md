@@ -9,7 +9,11 @@ Frozen before the first scored experiment. Any change here is an ADR in
   on `prompt_id` groups, falling back to `GroupKFold(5)` when a class has fewer
   than five prompt groups (`src/validation.make_splits`, method `auto`).
 - **Secondary (robustness):** prompt-held-out split with a different seed
-  (`make_holdout`). Used only for the final check, never for selection.
+  (`make_holdout`). Used only for a final check, never for selection. The seed-7
+  holdout has been **examined** repeatedly (D015–D017) and is no longer
+  "untouched"; a **fresh** holdout (seed 2027, 25 prompts / 450 rows) is reserved
+  for final selection and is not scored until then
+  (`experiments/stress_k.py --reserve-fresh-holdout`).
 - **Repeatability:** seed checks with 2–3 alternative seeds are reported as a
   stability check, not used to pick the winner. Implemented by
   `src/stability.py` (`python -m src.cli stability`, `make stability`), which
@@ -43,7 +47,10 @@ in validation text is absent from the fitted vocabulary.
 ## 3. Metric and reporting
 
 - **Primary:** pooled out-of-fold balanced accuracy over all validation rows
-  (one prediction per row across the five folds).
+  (one prediction per row across the five folds). This is the **main comparison
+  for independent-passage models** (argmax blend, DeBERTa, GBDT, ...): a row's
+  argmax prediction does not depend on how many sibling passages are scored
+  beside it, so the full OOF is the most statistically efficient estimate.
 - **Stability:** mean ± std of the five per-fold balanced accuracies.
 - **Diagnostics:** macro F1 (not the competition metric), per-class recall,
   confusion matrix, within-provider confusion share, fit/inference seconds,
@@ -52,6 +59,36 @@ in validation text is absent from the fitted vocabulary.
   (`metrics.evaluate`), never scored as zero.
 - Public leaderboard scores are recorded separately in the registry and are
   never used as a selection signal.
+
+### 3.1 k-subsampled stress test (batch-dependent methods only)
+
+The hidden test is believed to have ~1–3 passages per prompt (k≈2), not the train
+set's k=18 (D017). Transductive post-processing (recovered-group Hungarian,
+damped Sinkhorn) can exploit batch structure the test does not have. We therefore
+keep the full grouped OOF as the primary metric and add a **stress test**, not a
+second selection score:
+
+- Subsample the pooled OOF to k = 1, 2, 3, 18 passages per prompt, repeated over
+  ≥10 subsample seeds (`experiments/stress_k.py`).
+- Report **paired differences** (method − argmax) on the *same* subsampled rows:
+  mean ± sample std and a 95% Student-t CI across seeds (`metrics.paired_difference`,
+  `metrics.mean_ci`). Report the argmax BA ± std too. Never report only the best
+  sampled score.
+- Settings are **fixed and pre-registered** (e.g. Sinkhorn strength 0.3 / 0.6,
+  target_mix 0.35); we do **not** pick a best-of grid on the stress test — that
+  would be tuning on it.
+- This is **inference-only**. Transductive methods are never part of the primary
+  reported CV score (hard rule: no transductive steps in reported scores). A
+  batch method is adopted only if its paired-difference CI excludes 0 at test-like
+  k on both the CV and the (examined) holdout, and then only on top of a strong
+  ensemble (Phase 4).
+
+### 3.2 Holdout reserve
+
+The seed-7 holdout is **examined** (used in D015–D017) and may be optimistic.
+Before final selection we either score the **fresh reserved** seed-2027 holdout
+once, or use nested grouped evaluation. The fresh holdout is persisted but not
+scored until then; examining it early burns the reserve.
 
 ## 4. Baselines and ablation order
 

@@ -10,6 +10,8 @@ from src.metrics import (
     confusion_matrix,
     evaluate,
     macro_f1,
+    mean_ci,
+    paired_difference,
     per_class_recall,
     within_provider_confusions,
 )
@@ -91,3 +93,43 @@ def test_within_provider_confusions_counts_same_provider_errors():
     assert counts["errors"] == 2
     assert counts["within_provider_errors"] == 1
     assert counts["cross_provider_errors"] == 1
+
+
+def test_paired_difference_is_elementwise_other_minus_base():
+    base = [0.40, 0.50, 0.60]
+    other = [0.42, 0.48, 0.65]
+    diff = paired_difference(base, other)
+    assert diff == pytest.approx([0.02, -0.02, 0.05])
+
+
+def test_paired_difference_rejects_length_mismatch():
+    with pytest.raises(ValueError, match="paired length mismatch"):
+        paired_difference([0.1, 0.2], [0.1])
+
+
+def test_mean_ci_single_value_collapses_to_point():
+    summary = mean_ci([0.42])
+    assert summary["n"] == 1
+    assert summary["mean"] == pytest.approx(0.42)
+    assert summary["std"] == 0.0
+    assert summary["ci_low"] == pytest.approx(0.42)
+    assert summary["ci_high"] == pytest.approx(0.42)
+
+
+def test_mean_ci_brackets_mean_with_sample_std():
+    values = [0.40, 0.42, 0.44, 0.46]
+    summary = mean_ci(values)
+    assert summary["n"] == 4
+    assert summary["mean"] == pytest.approx(0.43)
+    assert summary["std"] == pytest.approx(np.std(values, ddof=1))
+    assert summary["ci_low"] < summary["mean"] < summary["ci_high"]
+    assert summary["ci_half"] == pytest.approx(
+        summary["ci_high"] - summary["mean"]
+    )
+
+
+def test_mean_ci_rejects_empty_and_bad_confidence():
+    with pytest.raises(ValueError, match="no values"):
+        mean_ci([])
+    with pytest.raises(ValueError, match="confidence"):
+        mean_ci([0.1, 0.2], confidence=1.5)

@@ -1,0 +1,53 @@
+# Phase 1c — cheap complementary GBDT (HistGradientBoosting) on richer stylometry
+# and multi-view word/char SVD. CPU-feasible; dense input required (style-only or
+# svd-reduced). Fixed grouped folds; per-fold fit of every learned transform.
+# Compare official-only here, then official+pool via experiments/pool_train.py.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+models:
+  - name: gbdt_style
+    features: []
+    style: true
+    classifier: gbdt
+    class_weight: balanced
+    max_iter: 300
+    learning_rate: 0.05
+    max_leaf_nodes: 31
+    min_samples_leaf: 20
+    l2_regularization: 1.0
+
+  - name: gbdt_char_svd200
+    features: [char]
+    style: true
+    svd: 200
+    classifier: gbdt
+    class_weight: balanced
+    max_features: 100000
+    min_df: 2
+    char_ngram_range: [2, 5]
+    max_iter: 300
+    learning_rate: 0.05
+    max_leaf_nodes: 31
+    min_samples_leaf: 20
+    l2_regularization: 1.0
+
+  - name: gbdt_multiview_svd256
+    features: [char, word]
+    style: true
+    svd: 256
+    classifier: gbdt
+    class_weight: balanced
+    max_features: 100000
+    min_df: 2
+    char_ngram_range: [2, 5]
+    word_ngram_range: [1, 2]
+    max_iter: 300
+    learning_rate: 0.05
+    max_leaf_nodes: 31
+    min_samples_leaf: 20
+    l2_regularization: 1.0

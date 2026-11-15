@@ -8,12 +8,14 @@ from typing import Any
 
 import joblib
 import numpy as np
+from scipy import sparse
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.svm import LinearSVC
 
 from src.constants import LABELS, N_CLASSES
 
-CLASSIFIERS = ("linearsvc", "logreg", "sgd")
+CLASSIFIERS = ("linearsvc", "logreg", "sgd", "gbdt")
 
 
 class ModelError(ValueError):
@@ -53,6 +55,11 @@ class ModelSpec:
             )
         if spec.nuisance_k and not spec.svd:
             raise ModelError(f"model {spec.name}: nuisance_k requires an svd size")
+        if spec.classifier == "gbdt" and spec.features and not spec.svd:
+            raise ModelError(
+                f"model {spec.name}: gbdt needs dense input — set an svd size or use "
+                "style-only features (no raw tf-idf kinds)"
+            )
         return spec
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,6 +106,21 @@ def build_classifier(spec: ModelSpec):
             max_iter=2000,
             random_state=spec.seed,
         )
+    if spec.classifier == "gbdt":
+        p = spec.params
+        return HistGradientBoostingClassifier(
+            loss="log_loss",
+            learning_rate=float(p.get("learning_rate", 0.1)),
+            max_iter=int(p.get("max_iter", 200)),
+            max_leaf_nodes=int(p.get("max_leaf_nodes", 31)),
+            max_depth=p.get("max_depth"),
+            min_samples_leaf=int(p.get("min_samples_leaf", 20)),
+            l2_regularization=float(p.get("l2_regularization", 0.0)),
+            max_bins=int(p.get("max_bins", 255)),
+            class_weight=spec.class_weight,
+            early_stopping=False,
+            random_state=spec.seed,
+        )
     raise ModelError(f"unknown classifier {spec.classifier!r}")
 
 
@@ -140,11 +162,15 @@ class ModelBundle:
         if y_idx.size and (y_idx.min() < 0 or y_idx.max() >= N_CLASSES):
             raise ModelError("class indices outside the 18-label range")
         matrix = self.builder.fit_transform(list(texts), groups=groups)
+        if self.spec.classifier == "gbdt" and sparse.issparse(matrix):
+            matrix = matrix.toarray()
         self.classifier.fit(matrix, y_idx)
         return self
 
     def decision_function(self, texts) -> np.ndarray:
         matrix = self.builder.transform(list(texts))
+        if self.spec.classifier == "gbdt" and sparse.issparse(matrix):
+            matrix = matrix.toarray()
         scores = np.asarray(self.classifier.decision_function(matrix))
         present = np.asarray(self.classifier.classes_, dtype=np.int64)
         n = matrix.shape[0]

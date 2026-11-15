@@ -19,12 +19,12 @@ from src.repro import env_snapshot, git_commit
 
 
 def fit_final(
-    model_configs: list[dict],
-    train_df: pd.DataFrame,
-    out_dir: str | Path,
-    seed: int = RANDOM_STATE,
-    dataset_label: str = "official",
-) -> Path:
+    model_configs,
+    train_df,
+    out_dir,
+    seed=RANDOM_STATE,
+    dataset_label="official",
+):
     """Refit every model on all labelled rows and write a loadable artifact dir."""
     out_dir = Path(out_dir)
     (out_dir / "models").mkdir(parents=True, exist_ok=True)
@@ -58,7 +58,7 @@ def fit_final(
     return path
 
 
-def load_final(out_dir: str | Path) -> tuple[dict, dict]:
+def load_final(out_dir):
     """Load fitted bundles and the manifest from a final artifact directory."""
     out_dir = Path(out_dir)
     manifest_path = out_dir / "manifest.json"
@@ -77,7 +77,7 @@ def load_final(out_dir: str | Path) -> tuple[dict, dict]:
     return bundles, manifest
 
 
-def load_weights(path: str | Path | None) -> dict[str, float] | None:
+def load_weights(path):
     if path is None:
         return None
     path = Path(path)
@@ -91,11 +91,7 @@ def load_weights(path: str | Path | None) -> dict[str, float] | None:
     return weights
 
 
-def blend_score_matrix(
-    bundles: dict,
-    texts: list[str],
-    weights: dict[str, float] | None = None,
-) -> np.ndarray:
+def blend_score_matrix(bundles, texts, weights=None):
     """Row-normalised blend margins (n_rows x N_CLASSES); not probabilities."""
     if not bundles:
         raise ValueError("no fitted models")
@@ -117,55 +113,83 @@ def blend_score_matrix(
     return np.asarray(total)
 
 
-def predict_dataframe(
-    bundles: dict,
-    test_df: pd.DataFrame,
-    weights: dict[str, float] | None = None,
-) -> np.ndarray:
-    """Predict labels for ``test_df``; blends normalised margins if >1 model."""
+def predict_dataframe(bundles, test_df, weights=None):
+    """Predict labels for test_df; blends normalised margins if >1 model."""
     texts = test_df["text"].astype(str).tolist()
     indices = blend_score_matrix(bundles, texts, weights).argmax(axis=1)
     return np.asarray([LABELS[int(i)] for i in indices], dtype=object)
 
 
 def predict_dataframe_crossed(
-    bundles: dict,
-    test_df: pd.DataFrame,
-    weights: dict[str, float] | None = None,
+    bundles,
+    test_df,
+    weights=None,
     encoder=None,
-    distance_threshold: float | None = 0.4,
-    n_clusters: int | None = None,
-    models_per_prompt: int = 18,
-) -> np.ndarray:
+    distance_threshold=0.4,
+    n_clusters=None,
+    models_per_prompt=18,
+):
     """Crossed-design prediction: cluster passages into prompt groups, then
     enforce one-passage-per-model assignment within each recovered group.
 
-    Label-free and transductive (uses only test text).  ``encoder`` embeds the
-    passages for clustering; provide exactly one of ``n_clusters`` or
-    ``distance_threshold`` (default cosine 0.4).  When neither is given, the
-    group count is estimated as ``n_rows / models_per_prompt``.
+    Label-free and transductive (uses only test text). encoder embeds the
+    passages for clustering; provide exactly one of n_clusters or
+    distance_threshold (default cosine 0.4).  When neither is given, the
+    group count is estimated as n_rows / models_per_prompt.
     """
     if encoder is None:
         raise ValueError("crossed prediction requires an encoder for grouping")
+
     texts = test_df["text"].astype(str).tolist()
-    scores = blend_score_matrix(bundles, texts, weights)
-    emb = np.asarray(encoder.encode(texts), dtype=np.float32)
+    embeddings = encoder.encode(texts)
+
     if n_clusters is not None:
-        distance_threshold = None
-    elif distance_threshold is None:
-        n_clusters = max(2, int(round(len(texts) / models_per_prompt)))
-    labels = cluster_embeddings(
-        emb, n_clusters=n_clusters, distance_threshold=distance_threshold
-    )
-    indices = assign_one_per_model(scores, labels)
-    return np.asarray([LABELS[int(i)] for i in indices], dtype=object)
+        cluster_labels = cluster_embeddings(embeddings, n_clusters=n_clusters)
+    elif distance_threshold is not None:
+        cluster_labels = cluster_embeddings(embeddings, distance_threshold=distance_threshold)
+    else:
+        n_rows = len(test_df)
+        n_clusters = max(1, n_rows // models_per_prompt)
+        cluster_labels = cluster_embeddings(embeddings, n_clusters=n_clusters)
+
+    model_names = list(bundles.keys())
+    n_models = len(model_names)
+
+    predictions = np.full(len(test_df), None, dtype=object)
+
+    for group_id in np.unique(cluster_labels):
+        group_indices = np.where(cluster_labels == group_id)[0]
+        group_texts = [texts[j] for j in group_indices]
+        gscores = blend_score_matrix(bundles, group_texts)
+        if len(group_indices) <= n_models:
+            choice = assign_one_per_model(gscores, group_indices)
+        else:
+            choice = np.empty(len(group_indices), dtype=int)
+            ranked = np.argsort(-gscores.max(axis=1))
+            used_models = []
+            pos = 0
+            for rank in ranked:
+                if pos < n_models:
+                    ordered = np.argsort(-gscores[rank])
+                    chosen = next(m for m in ordered if m not in used_models)
+                    choice[rank] = chosen
+                    used_models.append(chosen)
+                    pos += 1
+                else:
+                    choice[rank] = gscores[rank].argmax()
+        for k, idx in enumerate(group_indices):
+            predictions[idx] = LABELS[choice[k]]
+
+    if np.any(predictions is None):
+        raise ValueError(
+            "Some predictions are missing; check clustering and assignment logic"
+        )
+
+    return predictions
 
 
-def predict_file(
-    out_dir: str | Path,
-    test_df: pd.DataFrame,
-    weights_path: str | Path | None = None,
-) -> tuple[np.ndarray, dict]:
+def predict_file(out_dir, test_df, weights_path=None):
+    """Convenient wrapper to load a final artifact dir and run prediction."""
     bundles, manifest = load_final(out_dir)
     weights = load_weights(weights_path)
     return predict_dataframe(bundles, test_df, weights), manifest

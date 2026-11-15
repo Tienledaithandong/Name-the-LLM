@@ -2,7 +2,7 @@ PYTHON ?= python
 DATA ?= data
 CONFIG ?= configs/baseline.yaml
 
-.PHONY: help install test demo audit splits baseline features embeddings frozen-encoder ensemble figures stability predict package predict-crossed package-crossed clean
+.PHONY: help install test demo audit splits baseline features embeddings frozen-encoder ensemble figures stability stress predict package predict-crossed package-crossed clean
 
 help:
 	@echo "make install     install runtime dependencies"
@@ -17,10 +17,11 @@ help:
 	@echo "make ensemble    greedy blend from saved OOF scores"
 	@echo "make figures     render report figures from saved CV artifacts"
 	@echo "make stability   blend robustness: alternative seeds + secondary holdout"
+	@echo "make stress      primary full OOF + k-subsampled paired-difference stress test"
 	@echo "make predict     refit on all data and write submission.parquet"
 	@echo "make package     build an upload-ready Kaggle dataset folder"
-	@echo "make predict-crossed   crossed-design inference (D016): prompt-group assignment"
-	@echo "make package-crossed   upload-ready dataset + offline MiniLM grouping encoder"
+	@echo "make predict-crossed   WITHDRAWN (D017/D018) research-only crossed inference"
+	@echo "make package-crossed   WITHDRAWN research-only dataset + offline MiniLM encoder"
 
 install:
 	$(PYTHON) -m pip install -r requirements.txt
@@ -60,16 +61,23 @@ figures:
 stability:
 	$(PYTHON) -m src.cli stability --config configs/submission.yaml --data-dir $(DATA)
 
+# Primary full grouped OOF + inference-only k-subsampled stress test (paired
+# differences + 95% CIs). Add --reserve-fresh-holdout to persist the seed-2027
+# reserve without scoring it. Needs optional sentence-transformers for clustering.
+stress:
+	$(PYTHON) experiments/stress_k.py --data-dir $(DATA)
+
 predict:
 	$(PYTHON) -m src.cli predict --config configs/submission.yaml --data-dir $(DATA) --fit
 
 package:
 	$(PYTHON) -m src.cli package --dataset official
 
-# Crossed-design submission (D016): the same blend (configs/submission.yaml) plus
-# test-time prompt-group recovery + one-per-model assignment. Needs the optional
-# sentence-transformers dependency and a local MiniLM checkpoint (auto-resolved
-# from the HF cache, or set ENCODER_PATH=/path/to/checkpoint).
+# WITHDRAWN (D017/D018) — research-only, NOT the submission default. The same blend
+# (configs/submission.yaml) plus test-time prompt-group recovery + one-per-model
+# assignment; the gain is a k=18 artifact that does not deploy to a k~2 test. Needs
+# the optional sentence-transformers dependency and a local MiniLM checkpoint
+# (auto-resolved from the HF cache, or set ENCODER_PATH=/path/to/checkpoint).
 ENCODER_PATH ?=
 predict-crossed:
 	$(PYTHON) -m src.cli predict --config configs/submission.yaml --data-dir $(DATA) --fit --crossed $(if $(ENCODER_PATH),--encoder-path $(ENCODER_PATH),)

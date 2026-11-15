@@ -1,0 +1,25 @@
+# DeBERTa-v3 GPU kernel requirements (Name That LLM — Phase 1b).
+# Install inside the Kaggle GPU notebook (internet ON for the checkpoint, then
+# OFF for the graded run — the notebook sets HF_HUB_OFFLINE=1 itself).
+#
+# Exact pins for torch/transformers should be machined from the dev env before
+# freezing (python -m pip freeze). Format matches requirements.txt.
+#
+# Run the kernel:
+#     python kaggle/deberta/deberta_train.py --save-final
+# Copy final_model/* into a Kaggle dataset, attach it, then:
+#     HF_HUB_OFFLINE=1 python kaggle/deberta/predict.py --model-dir /kaggle/working/deberta_cv/final_model
+
+numpy>=2.0
+pandas>=2.2
+scipy>=1.11
+pyarrow>=15
+PyYAML>=6.0
+psutil>=5.9
+
+# GPU training + offline inference
+sentencepiece>=0.2
+safetensors>=0.10
+torch>=2.3
+transformers>=4.45
+accelerate>=0.29

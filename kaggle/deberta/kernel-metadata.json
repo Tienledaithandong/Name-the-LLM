@@ -1,0 +1,14 @@
+{
+  "id": "tiennamlee/name-that-llm-deberta-official-vs-pool-cv",
+  "title": "Name That LLM - DeBERTa official vs pool CV",
+  "code_file": "deberta_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "competition_sources": ["name-that-llm"],
+  "dataset_sources": ["crtproduction/name-that-llm-open-pool"],
+  "kernel_sources": [],
+  "model_sources": []
+}

@@ -6,15 +6,18 @@ it. Metric: **balanced accuracy** (mean per-class recall).
 
 Competition: <https://www.kaggle.com/competitions/name-that-llm>
 
-> **Status (2026-11-14):** pipeline implemented, tested, and evaluated on the
-> **official training data** with prompt-grouped CV. The owner submitted the
-> argmax blend (`0.5 × char + 0.5 × style`, 0.3760 pooled OOF) → **0.356 public
-> LB** (top score 0.7). A **crossed-design candidate** (ADR D016) adds test-time
-> prompt-group recovery + one-per-model assignment and is validated at **0.5000**
-> on the untouched holdout and **0.4716 / 0.4657** on alternative fold seeds; it
-> is packaged and ready, **pending the owner's submission**. See
-> `docs/improvement_plan.md`. Synthetic-fixture numbers are retained only as a
-> pipeline check and are labelled as such.
+> **Status (2026-11-14, rev 2):** pipeline implemented, tested, and evaluated on
+> the **official training data**. The owner submitted the argmax blend
+> (`0.5 × char + 0.5 × style`) → **0.356 public LB**; official top is **0.771**
+> (5,851 teams). A crossed-design candidate (ADR D016) was built and validated at
+> k=18 (holdout 0.5000), but **strategy research + honest k-subsampled CV (ADR
+> D017) show the hidden test has ~2 passages per prompt, where the Hungarian gain
+> collapses to ~0**. The crossed candidate is therefore **withdrawn as a submission
+> default**; the argmax blend remains the safe baseline. The ~0.34 gap to the
+> leader is a **base-model capability gap** — the revised roadmap (`docs/improvement_plan.md`,
+> evidence in `docs/strategy_review.md`) prioritises a clean external pool +
+> fine-tuned DeBERTa over post-processing. Synthetic-fixture numbers are retained
+> only as a pipeline check and are labelled as such.
 
 ## What is verified vs. assumed
 
@@ -71,7 +74,7 @@ Key properties:
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pytest -q            # 111 tests
+python -m pytest -q            # 120 tests
 ```
 
 Python 3.11+ (developed on 3.13). Versions are pinned in
@@ -187,18 +190,32 @@ duplicate texts, mean 114.7 words, 57.84% of passages contain non-ASCII
 characters, and there is no markdown or emoji in the corpus. Details in
 `artifacts/audit/official/data_audit.md` and `docs/data_audit.md`.
 
-### Crossed-design candidate (D016, pending submission)
+### Crossed-design candidate (D016 — WITHDRAWN by D017, k=18 artifact)
+
+> **Withdrawn as a submission default (ADR D017; reframed D018).** The gains below
+> were measured at **k=18 passages per prompt** (the train design). The hidden test
+> is **k≈2**, where the Hungarian paired gain (method − argmax) shrinks to a
+> marginal +0.0068 [+0.0032,+0.0104] on cv_s42 and +0.0029 [−0.0059,+0.0117] on the
+> examined holdout (CI spans 0). Do **not** submit this candidate. The k-robust
+> replacement (`src/calibration.py`, damped Sinkhorn) is ~neutral on the weak blend
+> (paired-diff CIs span 0 at k=2) and is reserved for a future strong ensemble. The
+> primary metric for the argmax blend is the **full grouped OOF** (0.3760 cv_s42).
+> See `docs/strategy_review.md` and `experiments/stress_k.py`.
 
 The training set is a balanced full factorial (150 prompts × 17–18 of the 18
-models). The hidden test mirrors this, so passages answering the same prompt can
-be recovered by semantic clustering and constrained to **one passage per model**.
-`src/crossed.py` (Hungarian assignment) + `src/grouping.py` (MiniLM agglomerative
-clustering) + `src.inference.predict_dataframe_crossed` implement this label-free,
-transductive inference step. The blend members and weights are unchanged.
+models). The hidden test does **not** mirror this (k≈2, D017), so the premise
+fails and the mechanism below is **research-only**: passages answering the same
+prompt can be recovered by semantic clustering and constrained to **one passage
+per model**. `src/crossed.py` (Hungarian assignment) + `src/grouping.py` (MiniLM
+agglomerative clustering) + `src.inference.predict_dataframe_crossed` implement
+this label-free, transductive inference step. The blend members and weights are
+unchanged.
+
+k=18 measurements (historical — **not** deployable k≈2 estimates):
 
 | split | argmax blend | recovered-group assignment (cosine thr 0.4) | gain |
 |---|---|---|---|
-| untouched holdout (25 prompts, seed 7) | 0.3956 | **0.5000** | +0.1044 |
+| examined holdout (25 prompts, seed 7) | 0.3956 | **0.5000** | +0.1044 |
 | grouped CV seed 7 | 0.3608 | 0.4716 | +0.1108 |
 | grouped CV seed 13 | 0.3582 | 0.4657 | +0.1075 |
 | grouped CV seed 42 (reference) | 0.3760 | 0.4704 | +0.0944 |
@@ -240,12 +257,13 @@ src/
   ensemble.py       greedy OOF blending on normalised margins
   inference.py      final refit and prediction (argmax + crossed-design)
   crossed.py        within-prompt centering + one-per-model Hungarian assignment
+  calibration.py    k-robust damped Sinkhorn-Knopp calibration (no grouping)
   grouping.py       MiniLM embedding clustering + prompt-group purity metrics
   submission.py     parquet writing + validation
   audit.py          data audit, report, class-balance/length figures
   figures.py        report figures from saved OOF/metrics (confusion, recall, ablation)
   cli.py            audit / splits / train / ensemble / figures / predict / package / demo
-tests/              111 unit and integration tests
+tests/              120 unit and integration tests
 figures/            generated report figures (PNG)
 kaggle/             submission.ipynb (offline, attached-artifact)
 experiments/        registry.csv, reports

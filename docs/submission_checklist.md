@@ -4,19 +4,30 @@ Account-sensitive steps below are **owner-only**; the agent prepares artifacts
 and instructions but does not accept rules, upload, or submit. Everything else
 is already reproducible from this repository.
 
-## Verified evidence to date (local grouped CV, not leaderboard)
+## Verified evidence to date (local CV, not leaderboard)
 
-- Adopted candidate: **crossed inference** (D016): recovered-group one-per-model
-  Hungarian assignment on blend OOF, with test-time prompt groups recovered by
-  clustering frozen-miniLM topic embeddings (cosine distance threshold 0.4).
-  Blend members are `0.5 × char_tfidf_logreg + 0.5 × style_only`
-  (`configs/submission.yaml`, `artifacts/cv/official/ensemble/weights.json`).
+> **Withdrawn (ADR D017; reframed D018):** the crossed Hungarian candidate below
+> was validated at **k=18** passages/prompt. The k-subsampled **stress test**
+> (`experiments/stress_k.py`) shows the hidden test is **k≈2**, where the Hungarian
+> paired gain (method − argmax) is marginal: +0.0068 [+0.0032,+0.0104] on cv_s42 and
+> +0.0029 [−0.0059,+0.0117] on the examined holdout (CI spans 0). **Do not submit
+> the crossed candidate.** The safe baseline is the **argmax blend** (`make predict`
+> / `make package`, no `--crossed`); its primary metric is the full grouped OOF
+> **0.3760**. See `docs/strategy_review.md`.
+
+- Safe baseline: **argmax blend** `0.5 × char_tfidf_logreg + 0.5 × style_only`
+  (`configs/submission.yaml`), **primary full grouped OOF 0.3760** (cv_s42) /
+  0.3956 (examined holdout); k≈2 stress-test argmax ~0.36–0.39; submitted public LB
+  **0.356**. Official top **0.771**.
+- Crossed inference (D016, **withdrawn**): recovered-group Hungarian assignment on
+  blend OOF. k=18 holdout 0.5000 / seeds 0.4716 / 0.4657 — **a k=18 artifact**;
+  at k=2 the paired gain is marginal (cv_s42 +0.0068 CI[+0.0032,+0.0104]; holdout
+  +0.0029 CI[−0.0059,+0.0117], spans 0). Stress test is inference-only, not a
+  selection score.
+- Damped Sinkhorn calibration (`src/calibration.py`) is k-robust but ~neutral on
+  the weak blend; reserved for a future strong ensemble (Phase 4).
 - Blend-only (argmax) pooled OOF balanced accuracy **0.3760**, +0.0567 over the
-  best single model, positive in all five folds.
-- Crossed inference (grouping + assignment) on three splits: untouched holdout
-  **0.5000** (+0.1044), grouped CV seed 7 **0.4716** (+0.1108), seed 13
-  **0.4657** (+0.1075). Purity held-out 1.000, CV s7 0.980, CV s13 0.990.
-  ~88% of the oracle ceiling (+0.1100).
+  best single model, positive in all five folds (k=18 fit diagnostic).
 - Alternative seed 7 reproduces the blend gain (+0.0452); full table in
   `artifacts/stability/official/stability.md` (regenerate with `make stability`).
 - Prompt-nuisance suppression (H2) is a negative result and is **not** in the
@@ -38,7 +49,15 @@ is already reproducible from this repository.
    and re-running `make predict`.
 3. Resolve any open compliance question in `docs/competition_spec.md` §10.
 
-## Build and upload the artifact (crossed candidate, D016)
+## Build and upload the artifact
+
+**Recommended (safe baseline):** `make predict` then `make package` (no `--crossed`)
+→ argmax blend, no encoder dependency. Upload `artifacts/kaggle_dataset/` and
+attach to the notebook. This is the D009/D012 blend that scored 0.356.
+
+**Crossed candidate (D016) — WITHDRAWN by D017; do not submit.** The steps below
+are retained for research reproducibility only. The k≈2 hidden test removes the
+Hungarian gain (see `docs/strategy_review.md`).
 
 4. `make predict-crossed` — refits the two blend members on all labelled rows and
    writes `artifacts/submissions/official/submission.parquet` using crossed

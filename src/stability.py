@@ -6,7 +6,7 @@ partitions without re-tuning anything:
 
 * ``seed_stability`` re-runs grouped CV for the blend members under alternative
   fold seeds and re-selects the greedy blend on each, reporting the gain.
-* ``holdout_check`` fits the members once on the training side of the untouched
+* ``holdout_check`` fits the members once on the training side of the examined
   secondary prompt-held-out split and scores the fixed adopted weights there.
 
 Neither is used to pick the winner; they only confirm or refute the seed-42 gain.

@@ -123,8 +123,15 @@ explicitly bounded by, the verified rules.
 - [x] Interactive test-file row count: the downloaded `test.csv` has **3 rows**,
       matching the Data page; the Overview's "single example row" wording is the
       outlier. The code remains agnostic to the count.
-- [ ] Exact public/private split ratio of the hidden test set (not published on
-      the pages above).
+- [x] Exact public/private split ratio: the leaderboard page states **public ≈ 40%
+      of test, private ≈ 60%** (read directly 2026-11-14). Verified top score
+      **0.771**, 5,851 teams.
+- [ ] Hidden-test prompt multiplicity **k**: NOT officially published. Community
+      sources converge on **k≈1–3** (~2,000 prompts × ~2 passages), and local
+      honest k-subsampled CV confirms the crossed-Hungarian gain collapses from
+      +0.10 at k=18 to ~0 at k=2 (ADR D017, `docs/strategy_review.md`). Treated as
+      high-confidence but unverified; the k-robust argmax/Sinkhorn path is safe at
+      any k.
 - [ ] Whether any GPU quota applies beyond the 9-hour runtime limit (the page
       states only the runtime limit; no weekly quota is published there).
 - [ ] Official confirmation that a standalone technical report may be published

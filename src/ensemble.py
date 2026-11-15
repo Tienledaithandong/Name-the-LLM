@@ -1,11 +1,3 @@
-"""Score blending and ensemble selection from fold-aligned OOF scores.
-
-LinearSVC margins are not probabilities, so blending happens on row-normalised
-margins (per-passage z-scores) rather than on softmax-like values.  Weights are
-chosen by greedy selection with replacement (Caruana et al.) on pooled OOF,
-which has few effective degrees of freedom and resists overfitting 2,699 rows.
-"""
-
 from __future__ import annotations
 
 import json
@@ -18,6 +10,16 @@ from src.data import indices_to_labels
 from src.metrics import balanced_accuracy
 
 SENTINEL = -1e8
+
+
+def load_weights(path: str | Path | None) -> dict[str, float] | None:
+    """Load ensemble weights from a JSON artifact."""
+    if path is None:
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    weight = payload.get("weights", payload)
+    weight = {k: float(v) for k, v in weight.items() if float(v) > 0}
+    return weight if weight else None
 
 
 def load_oof(artifacts_dir: str | Path) -> dict[str, dict]:
@@ -121,7 +123,6 @@ def greedy_blend(
     weights = {k: v / total for k, v in counts.items()}
     blended = evaluate_blend(normalized, y, weights)
 
-    # Keep at most ``max_models`` members, dropping the smallest weights.
     if len(weights) > max_models:
         keep = dict(sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:max_models])
         total_keep = sum(keep.values())

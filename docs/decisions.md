@@ -287,3 +287,273 @@ from the attached dataset (Kaggle inference has no internet).
 Reopen if: the owner's LB submission with crossed inference does not beat 0.356,
 or real-test purity collapses (detectable as a degenerate label distribution /
 many duplicate-model groups) — fall back to the argmax blend, then Phase C/D.
+
+## D017 — Hidden test is k≈2, not k=18; withdraw crossed Hungarian, adopt honest k-CV (2026-11-14)
+
+Researched the attached `Kaggle LLM Attribution Strategy.md` against primary
+sources (`docs/strategy_review.md`). Verified: official leaderboard top **0.771**
+(5,851 teams; public 40% / private 60%); the ATLAS paper (arXiv 2610.19583) is real
+but attributes to model **family** and is weakest on version siblings; the external
+`crtproduction/name-that-llm-open-pool` (211k) is a public Kaggle dataset. The
+decisive claim — hidden test has **~1–3 passages per prompt (k≈2)**, not 18 — is
+corroborated by three independent community sources and a forensic submission log
+(Hard Hungarian 0.639 LB vs Damped Sinkhorn 0.664 LB on the same pipeline). It is
+**not** an official Kaggle fact, so we tested it locally.
+
+`experiments/phase_k2_cv.py` subsamples the pooled OOF blend predictions to k
+passages per prompt (honest CV) and compares argmax / recovered Hungarian / damped
+Sinkhorn (`src/calibration.py`, new, k-robust, 9 tests):
+
+| split | k | argmax | recovered Hungarian | best Sinkhorn |
+|---|---|---|---|---|
+| cv_s42 | 18 | 0.3760 | 0.4690 (+0.093) | 0.3767 |
+| cv_s42 | 2 | 0.3607 | 0.3643 (+0.004) | 0.3611 |
+| holdout_s7 | 18 | 0.3956 | 0.5000 (+0.104) | 0.4000 |
+| holdout_s7 | 2 | 0.3872 | 0.3833 (−0.004) | 0.3964 |
+
+**The Hungarian gain collapses from +0.10 at k=18 to ~0 (or negative) at k=2.**
+D016's +0.10 lift was a k=18 validation artifact, not deployable to a k≈2 test.
+Sinkhorn is k-robust but ~neutral on the weak 0.376 blend (it pays off only on a
+strong ensemble). Recorded in `experiments/registry.csv` (`phase_k2_*`) and
+`artifacts/phase_k2/results.json`.
+
+Decision:
+1. **Retract D016's "adopt crossed inference as submission candidate."** Do not
+   submit the crossed Hungarian package. The **argmax blend (D009/D012)** remains
+   the safe baseline. `predict --crossed` / `package --crossed` stay available as
+   research tools but are not the recommended submission path.
+2. **Honest k≈2 subsampled CV is the primary deployable estimate** going forward;
+   k=18 grouped CV is a training-side fit diagnostic only, never an LB proxy.
+3. The ~0.34 gap to the leader is a **base-model capability gap**. Prioritise
+   Phase 1 (clean external pool + DeBERTa-v3 sequence head + GBDT stylometry) over
+   post-processing. Reserve damped Sinkhorn + typography + sibling residuals for
+   Phase 4, on top of a strong ensemble, adopted only on validated honest-CV gain.
+4. Compliance: single account only; the strategy source's leaked credentials and
+   3-account quota orchestration are **not** used (they violate the one-account
+   rule). External pool must be registered + decontaminated + validated.
+
+Reopen if: official Kaggle documentation states the hidden test is k=18 (would
+re-enable crossed assignment), or honest k≈2 CV of a future strong ensemble shows
+a reproducible Hungarian gain (unlikely given the mechanism).
+
+## D018 — Evaluation reframe: full OOF primary, k-subsampling is a stress test (2026-11-14)
+
+Owner review corrected two framing errors in D017:
+
+1. **D017 over-rotated** by making "honest k≈2 subsampled CV" the primary estimate
+   for *everything*. For an **independent-passage model** (argmax blend, DeBERTa,
+   GBDT) a row's prediction is identical regardless of how many sibling passages
+   are scored beside it, so subsampling k only discards rows and adds noise. The
+   **full prompt-grouped out-of-fold balanced accuracy over all rows** is the
+   correct, most efficient **primary** metric and the main comparison. k=1,2,3,18
+   subsampling is demoted to a **stress test for batch/group-dependent methods**
+   (recovered Hungarian, damped Sinkhorn), which *can* change a row's prediction
+   based on its batch.
+2. **D017 reported a "best Sinkhorn" over a grid** — that is selection on the
+   stress test. We now report **fixed, pre-registered settings** and **paired
+   differences** (method − argmax) on the same subsampled rows, mean ± sample std
+   and a 95% Student-t CI across ≥10 subsample seeds (`metrics.paired_difference`,
+   `metrics.mean_ci`, new; 5 tests). Transductive methods stay **out of the
+   primary reported CV** (hard rule). The seed-7 holdout is relabelled
+   **examined** (not "untouched"); a **fresh seed-2027 holdout** (25 prompts /
+   450 rows) is reserved, persisted but unscored, for final selection.
+
+`experiments/phase_k2_cv.py` is replaced by `experiments/stress_k.py`
+(`--reserve-fresh-holdout` persists the reserve without scoring). Results
+(`artifacts/stress_k/results.json`, registry `stress_*`):
+
+| split | primary full OOF | k=2 Hungarian Δ [95% CI] | k=2 Sinkhorn(0.3) Δ [95% CI] | k=18 Hungarian Δ |
+|---|---|---|---|---|
+| cv_s42 | **0.3760** (2699 rows, folds ±0.0026) | +0.0068 [+0.0032,+0.0104] | +0.0004 [−0.0025,+0.0032] | +0.0930 |
+| holdout_s7 (examined) | **0.3956** (450 rows) | +0.0029 [−0.0059,+0.0117] | −0.0037 [−0.0101,+0.0027] | +0.1044 |
+
+**Reading:** the large Hungarian gain is a k=18 artifact (+0.09/+0.10). At test-like
+k=2 it shrinks to a marginal, split-dependent +0.003…+0.007 whose CI spans 0 on the
+holdout — not a reliable deployable gain. Sinkhorn is ~neutral at k=2 (CIs span 0).
+This **confirms D017's withdrawal** of crossed Hungarian as the submission default,
+now with honest uncertainty rather than a best-of-grid point estimate.
+
+Decision:
+1. Primary metric for independent-passage models = **full prompt-grouped OOF BA**;
+   the argmax blend's headline is **0.3760** (cv_s42), 0.3956 (examined holdout).
+2. k-subsampled **stress test** reports paired diffs + CI for batch methods only;
+   inference-only; never a selection score; fixed settings, no best-of grid.
+3. Adopt a batch method only if its paired-diff CI excludes 0 at k≈2 on **both**
+   CV and holdout, and only on a strong ensemble (Phase 4). Currently none qualify.
+4. Reserve the fresh seed-2027 holdout for final selection; stop calling seed-7
+   "untouched". Reconcile notebook / external-data register / checklist (D017
+   withdrawal + this reframe).
+
+Reopen if: a future strong ensemble shows a batch-method paired-diff CI excluding 0
+at k≈2 on both splits (would justify Phase 4 post-processing), or official docs
+state the hidden test is k=18.
+
+## D019 — Open-pool v15 audited and admitted for training (pending validated gain) (2026-11-14)
+
+Phase 1a external-data audit. Owner downloaded the public Kaggle pool
+`crtproduction/name-that-llm-open-pool` **v15** (2026-11-14, CC BY-SA 4.0; 65
+sources CC BY 4.0 / CC BY-SA 4.0 / CC0). Verified against the actual parquet, not
+the README claims (`src/pool.py`, `experiments/pool_audit.py`, 9 hermetic tests;
+artifacts `artifacts/pool_audit/audit.json` + `clean_pool_ids.json`, registry
+`pool_audit` row):
+
+- **Schema:** 226,191 rows × 30 cols, 0 null text, `n_words` 36–275. **All 18
+  official labels present, exact match** to `constants.LABELS` (`per_model.csv`).
+  Uneven: `gemini-3.7-flash` 3,541 … `gemini-3.8-flash` 23,474 → class weights /
+  sampling required. Labels are publishers' claims, not re-verified.
+- **Routing-risk flags are already cleared.** `flag_gemini37_routing_risk`,
+  `flag_near_train_prompt`, `flag_train_prompt_regen` are **all False** for every
+  row. The 10,838 unverified gemini-3.7 routing-risk rows were moved out to
+  `gemini37_unverified.parquet` upstream; train-prompt answers (284) and mislabeled
+  rows (284) already removed. **Do NOT re-filter `flag_gemini37_routing_risk`** —
+  it is a no-op. This corrects the plan's original 1a instruction.
+- **Dedup vs official train:** dataset `max_cos_train` ≤ 0.30 (mean 0.0994),
+  `max_sim_train_prompt` ≤ 0.40, **0 exact text duplicates**. Independent
+  **per-fold** decontamination (word TF-IDF (1,2) cosine > 0.30, vectorizer fit on
+  each holdout fold only, chunked) over the 5 grouped cv_s42 folds removed
+  **4/1/3/6/5** rows (0 exact, 0 shared prompt every fold) → **union 19 removed**,
+  **clean pool 226,172**. This is the per-fold leakage guard the protocol requires.
+
+Decision:
+1. **Admit the clean 226,172-row pool for training** on official+pool folds, but
+   **admission is provisional until a validated gain** — official-only vs
+   official+pool must be compared on the **same** grouped folds (full OOF primary,
+   D018), reporting BA + per-class / within-provider recall including harm.
+2. **Leakage caveats (must honour for honest CV):** `match_weight` and `style_score`
+   were fitted on **all** official train prompts → **refit per-fold or drop these
+   columns**; never use them as fold-spanning features. `flag_kb_proxy_after_ruling`
+   marks 20,227 rows; hosts permit training on public datasets produced via proxy,
+   so keep by default (`strict=False`) with an optional strict drop for a
+   sensitivity check.
+3. **Licence:** CC BY-SA share-alike — derived artefacts (trained weights / pools)
+   inherit attribution + share-alike; record before any redistribution. No runtime
+   download at inference (internet off); pool ships attached or training-only.
+4. Keep the argmax blend (D009/D012) as the submission fallback until a
+   pool-trained candidate wins on the registered protocol.
+
+Reopen if: a fold-spanning feature leaks (`match_weight`/`style_score` used without
+per-fold refit), the pool licence/terms change, or official+pool shows no validated
+gain (then drop the pool and stay official-only).
+
+## D020 — GBDT stylometry/multi-view is a negative standalone result; ensemble footgun (2026-11-14)
+
+Phase 1c cheap complementary model. Added a `gbdt` classifier
+(sklearn `HistGradientBoostingClassifier`; lightgbm/catboost/xgboost are absent) to
+`src/model.py` with a dense-input guard (style-only or SVD-reduced; sklearn 1.9.1
+HistGBDT rejects sparse), `class_weight="balanced"`, `decision_function` margins
+(not probabilities), +4 hermetic tests; `configs/gbdt.yaml`. Official-only grouped
+OOF (cv_s42, registry `gbdt_*`):
+
+| model | pooled OOF BA | fit s | peak RSS GB |
+|---|---|---|---|
+| gbdt_style (56 style feats) | **0.2630** | 74 | 0.20 |
+| gbdt_char_svd200 (char+style→SVD200) | **0.2537** | 334 | 0.39 |
+| gbdt_multiview_svd128 (char+word+style→SVD128, 120 iter)* | **0.2426** | 262 | — |
+
+*Reduced budget: the full SVD256 / 300-iter multi-view config exceeded 560 s (heavy
+200k-feature SVD + 5400 trees) and was not completed; the reduced run confirms the
+same weak range. All GBDT variants are **far below the adopted 0.3760 char+style
+blend**. SVD compression discards the
+high-dimensional sparse char/word signal that LinearSVC/logreg exploit; stylometry
+alone is weak for 18-class attribution. The greedy blend does **not** select any
+GBDT member → **no validated blend gain** (D007). Decision: GBDT is **research
+only, not adopted**; the cheap-complementary-model hypothesis is rejected for this
+task. `experiments/pool_train.py` (official-only vs official+pool, per-fold decon,
+stratified pool cap, paired-diff CI, registry rows) is prepared; a GBDT+pool run is
+unlikely to reverse this and is deprioritised behind the DeBERTa encoder (D021).
+
+**Ensemble footgun (caution):** `python -m src.cli ensemble` greedily blends **all**
+OOF in `artifacts/cv/official/oof`, including the D013-**rejected**
+`minilm_embedding_style_logreg`. It re-selects `char_tfidf_logreg +
+minilm_embedding_style_logreg` (0.3786 CV) — the blend that **reverses on the
+holdout** (0.3933 vs 0.3956, D013). Writing those weights would, after `predict`
+filters models absent from `submission.yaml`, leave **char-only** and degrade the
+submission. The adopted submission weights are **`char_tfidf_logreg 0.5 +
+style_only 0.5` (pooled OOF 0.3760)**, restored to
+`artifacts/cv/official/ensemble/weights.json`. Do not treat the blind greedy-over-
+all output as the submission blend; keep `submission.yaml` members authoritative.
+
+Reopen if: a richer dense feature set (e.g. cached encoder embeddings + style) makes
+GBDT competitive on the grouped folds, or a GBDT member shows a validated blend gain
+on both CV and the reserved holdout.
+
+## D021 — Pursue DeBERTa-v3 on Kaggle GPU; official-only vs audited pool (2026-11-14)
+
+Phase 1b stronger neural baseline (the user's priority after the audit). Local torch
+is CPU-only, so fine-tuning runs on **Kaggle GPU** (owner authorised "use kaggle
+gpu"). Prepared a self-contained script kernel `kaggle/deberta/deberta_train.py` +
+`kernel-metadata.json`:
+
+- **Model:** `microsoft/deberta-v3-base` (18-class sequence head) first — **not**
+  large/8B–27B; do not assume the strategy's huge stacks fit one Kaggle GPU or give
+  their claimed gains. `--model-name` is configurable.
+- **Protocol:** same prompt-grouped folds (StratifiedGroupKFold, seed 42); full OOF
+  BA primary (D018). **official-only vs official+clean-pool** on the same folds;
+  pool decontaminated **per fold** against the held-out prompts (mirror of
+  `src.pool.decontaminate_fold`, verified to remove the same 4 rows on fold 0);
+  `match_weight`/`style_score` never used (D019). Reports per-class + within-provider
+  recall and **paired per-fold diff + 95% CI**.
+- **Budget guards:** a benchmark cell measures seq/s + peak GPU memory and
+  extrapolates runtime vs the 9h limit; a stratified **pool cap/fold** (default 40k)
+  and `--epochs-pool 1`, `--max-len 256`, fp16 keep the pool run in budget.
+- **Offline path:** training kernel uses internet ON only to fetch public weights;
+  `--save-final` exports weights for a separate **offline** inference notebook
+  (internet OFF, weights attached). Submission stays the argmax blend until a
+  DeBERTa candidate wins on the registered protocol.
+
+Pushed as a **private** kernel
+`tiennamlee/name-that-llm-deberta-official-vs-pool-cv` (version 1, GPU, competition
+`name-that-llm` + dataset `crtproduction/name-that-llm-open-pool` attached); status
+queued at write time. **No score yet** — results pending the GPU run; record OOF +
+metrics in the registry when downloaded (never fabricate). Non-GPU logic (data load,
+grouped folds with no prompt overlap, per-fold decon, stratified cap, metrics)
+validated locally against the real pool.
+
+Next: download `results.json` + OOF; compare official-only vs +pool; adopt only on a
+validated gain over 0.3760 on CV **and** the reserved seed-2027 holdout; then build
+the offline inference notebook, reproduce the full offline Kaggle run, and fix the
+sklearn 1.9.1 (train) vs 1.6.1 (Kaggle) mismatch before any submission.
+
+Reopen if: DeBERTa-base shows no validated pool gain (try larger context/model within
+budget, or cached-embedding readouts Phase 2), or GPU quota/runtime blocks the run.
+
+## D022 — DeBERTa-v3-base + pool helps the encoder but still loses to the sparse blend (2026-11-15)
+
+First Kaggle GPU run (T4, kernel v2; the v1 `Attempting to unscale FP16 gradients`
+crash was fixed by upcasting DeBERTa-v3's fp16 checkpoint to fp32 master weights
+before AMP — `build_model` now calls `model.float()`). Grouped 5-fold CV,
+`deberta-v3-base`, max_len 256, fp16, batch 16, lr 2e-5; official-only 3 epochs,
+official+pool 1 epoch with a stratified **40k/fold** cap (registry
+`deberta_v3_base_*`, `artifacts/deberta_kernel_output/deberta_cv/`):
+
+| variant | pooled OOF BA | fold BAs | fit s | peak GPU GB |
+|---|---|---|---|---|
+| official-only | **0.2241** | 0.217/0.183/0.226/0.252/0.243 | ~793 | 6.46 |
+| official+pool (40k/fold, 1ep) | **0.3049** | 0.294/0.300/0.307/0.317/0.306 | ~5170 | 6.46 |
+
+- **Pool gain is real:** paired per-fold diff **+0.0808**, 95% CI **[+0.054, +0.108]**
+  (excludes 0). External data substantially helps the encoder.
+- **But 0.305 < the adopted 0.376 sparse blend.** DeBERTa-base at this budget does
+  **not** beat the fallback. The community claims (official-only ~0.39, pool ~0.576)
+  are **not reproduced** with base / len256 / 1 pool epoch / capped pool — consistent
+  with the owner's warning not to trust the strategy's claimed gains.
+- **Benchmark:** 31–40 seq/s, peak **6.46 GB** (T4 16 GB has headroom for a larger
+  model), ~2.2 h total ≪ 9 h budget. Training healthy (loss 2.3→1.6).
+- **Fold caveat:** the kernel recomputed folds with **Kaggle's sklearn** (version
+  differs from local 1.9.1), so its per-fold decon counts ([7,4,8,1,2]) differ from
+  the local cv_s42 audit ([4,1,3,6,5]); the OOF is **not yet fold-aligned** with the
+  local sparse OOF. The within-kernel official-vs-pool paired diff is still valid
+  (same folds). Next run must load the persisted `splits_official.json` for exact
+  alignment before any cross-pipeline blend.
+
+Decision:
+1. **Keep the 0.376 char+style sparse blend as the submission fallback** (LB 0.356).
+   Do not adopt DeBERTa-base.
+2. Next GPU run: **stronger config within budget** — `deberta-v3-large`, longer
+   context (384), more pool epochs, exact local folds shipped to the kernel — then
+   test whether DeBERTa adds **diversity** to the sparse blend (fold-aligned OOF).
+3. Fix the sklearn train/Kaggle mismatch (ship folds + pin versions) before any
+   submission reproduction.
+
+Reopen if: a stronger DeBERTa config beats 0.376 on CV **and** the reserved seed-2027
+holdout, or a fold-aligned DeBERTa+sparse blend shows a validated gain.

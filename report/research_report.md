@@ -7,6 +7,15 @@ data with prompt-grouped CV. No leaderboard submission has been made, so no
 Kaggle score, rank or medal exists yet. The synthetic-fixture numbers are kept
 only as a pipeline-validation baseline.
 
+> **Superseded in part (ADR D017/D018, 2026-11-14).** This report describes the
+> D016 crossed-design candidate as "adopted". That decision was **retracted**: the
+> hidden test is k≈2 (not the train k=18), and the k-subsampled stress test
+> (`experiments/stress_k.py`) shows the Hungarian gain is a k=18 artifact. The
+> **argmax char+style blend** (full grouped OOF **0.3760**) is the submission
+> baseline; crossed inference and damped Sinkhorn are research-only. The seed-7
+> holdout is **examined**, not untouched; a fresh seed-2027 holdout is reserved.
+> Sections describing crossed adoption below are historical.
+
 ---
 
 ## Abstract
@@ -28,13 +37,14 @@ prompt-grouped folds) character TF-IDF reaches 0.3193 and stylometry alone
 0.2904; blending the two gives **0.3760** pooled out-of-fold balanced accuracy
 (+0.0567 over the best single model, positive in all five folds). Errors
 concentrate within providers (53.3% of errors), with sibling flash models the
-most confused pair. A D016 research track recovered the crossed-design signal
-through test-time prompt grouping: cluster test passages by frozen-miniLM topic
-embedding into prompt groups, then enforce one-per-model Hungarian assignment.
-This is the **adopted** submission candidate: it scores 0.5000 on the untouched
-holdout (+0.1044) and 0.4716/0.4657 on grouped CV seeds 7/13 (+0.1108/+0.1075),
-capturing ~88% of the oracle ceiling. The char+style blend is retained as the
-fallback single-model candidate.
+most confused pair. A D016 research track recovered a crossed-design signal through test-time prompt
+grouping: cluster test passages by frozen-MiniLM topic embedding into prompt
+groups, then enforce one-per-model Hungarian assignment. It scored 0.5000 on the
+seed-7 holdout at **k=18** (+0.1044) and 0.4716/0.4657 on grouped CV seeds 7/13.
+**This candidate was subsequently WITHDRAWN (D017/D018):** the hidden test is k≈2,
+where the Hungarian paired gain collapses to a marginal +0.003…+0.007 (95% CI
+spans 0 on the examined holdout). The **argmax char+style blend (0.3760 full
+grouped OOF)** is the submission baseline; the crossed track is research-only.
 
 ## 1. Introduction
 

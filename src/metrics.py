@@ -125,6 +125,43 @@ def aggregate_folds(fold_metrics: Iterable[dict]) -> dict:
     }
 
 
+def paired_difference(base, other) -> np.ndarray:
+    """Elementwise ``other - base`` for paired scores (e.g. method vs argmax).
+
+    Both sequences must have the same length: each pair is measured on the same
+    rows/subsample, so the difference removes the shared subsampling noise.
+    """
+    a = np.asarray(base, dtype=np.float64)
+    b = np.asarray(other, dtype=np.float64)
+    if a.shape != b.shape:
+        raise ValueError(f"paired length mismatch: {a.shape} vs {b.shape}")
+    return b - a
+
+
+def mean_ci(values, confidence: float = 0.95) -> dict:
+    """Mean, sample std (ddof=1), n and a Student-t confidence interval.
+
+    Used to summarise a statistic repeated over subsample seeds/folds. With a
+    single value the interval collapses to the point (no spread estimate).
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be in (0, 1)")
+    arr = np.asarray(values, dtype=np.float64)
+    n = int(arr.size)
+    if n == 0:
+        raise ValueError("no values to summarise")
+    mean = float(arr.mean())
+    if n < 2:
+        return {"n": n, "mean": mean, "std": 0.0,
+                "ci_low": mean, "ci_high": mean, "ci_half": 0.0}
+    std = float(arr.std(ddof=1))
+    from scipy.stats import t
+
+    half = float(t.ppf(0.5 + confidence / 2.0, n - 1) * std / np.sqrt(n))
+    return {"n": n, "mean": mean, "std": std,
+            "ci_low": mean - half, "ci_high": mean + half, "ci_half": half}
+
+
 def provider_of(label: str) -> str:
     from src.constants import PROVIDER_OF
 

@@ -1,227 +1,232 @@
-# Improvement plan — 0.356 → 0.7
+# Improvement plan — 0.356 → 0.7 (revised after strategy research)
 
-> **Status (2026-11-14):** active. Public LB **0.356** (owner submission of the
-> argmax blend), top score **0.7**. Argmax blend = `0.5 × char_tfidf_logreg +
-> 0.5 × style_only`, pooled grouped-CV **0.3760**. The **crossed-design candidate**
-> (D016) adds test-time prompt-group assignment, is validated (holdout **0.5000**,
-> seeds 0.4716/0.4657) and **packaged ready, pending the owner's submission**.
-> This plan is the working roadmap; results are filled in below as experiments
-> land. Numbers here are local grouped-CV unless explicitly labelled `public LB`.
+> **Status (2026-11-14, revision 2):** active. Public LB **0.356** (argmax blend).
+> Official leaderboard top **0.771** (5,851 teams; gold ≈ top 21, silver ≈ top 50;
+> public 40% / private 60%). Evidence base: `docs/strategy_review.md`.
+>
+> **Major correction (ADR D017):** the hidden test has **~1–3 passages per prompt
+> (k≈2)**, not the train set's k=18. Our crossed Hungarian candidate (D016) was
+> validated only at k=18. **Honest k-subsampled CV (Phase 0 below) shows the
+> Hungarian gain collapses from +0.10 at k=18 to ~0 (or negative) at k=2.** The
+> crossed candidate is therefore **withdrawn as a submission default**. The ~0.34
+> gap to the leader is a **base-model capability gap**, not a post-processing gap.
 
-## 1. Diagnosis
+## 1. Diagnosis (corrected)
 
-- **0.356 LB ≈ 0.376 CV.** The model generalises about as well as grouped CV
-  predicts, so the ~0.34 gap to the leader is a **capability gap**, not
-  overfitting or prompt-shift. We are missing a signal the top solutions use.
-- Our models score each passage **independently**. Char n-grams + 44 style
-  features conflate *which prompt was answered* (topic) with *who wrote it*
-  (style). H2 tried an SVD nuisance projection and failed (ADR D010) — a blunt
-  instrument whose ceiling we never measured.
-- **The untapped structure:** the audit (`docs/data_audit.md`) confirms the
-  training set is a **balanced full factorial** — 150 prompts, each answered by
-  17–18 of the 18 models. The hidden test (~4,000 rows) almost certainly mirrors
-  this (≈222 prompts × 18 models). Within a prompt, passages differ mainly by
-  **model style**; across prompts, by **topic**. Top solutions almost certainly
-  exploit this crossed design. We do not.
+- **0.356 LB ≈ 0.36–0.39 honest k≈2 CV.** The argmax blend generalises about as
+  well as honest CV predicts. The gap to 0.771 is **capability**: we score each
+  passage independently with char n-grams + 44 style features; top solutions use
+  fine-tuned encoders, external labelled pools, and multi-backbone readouts.
+- **The crossed-design lever was overstated.** Train is a full factorial (k=18),
+  but the hidden test is k≈2 (community-corroborated; locally confirmed by the
+  Hungarian-gain collapse). One-per-model assignment exploits a structure the
+  test does not have. At k≈2 it adds nothing and can overwrite correct predictions.
+- **Post-processing is a small lever (~+0.01–0.03), not the main one.** Damped
+  Sinkhorn calibration is k-robust and safe, but on our weak 0.376 blend it is
+  ~neutral; it pays off only on top of a strong ensemble (the community applies it
+  at 0.66+). Typography guardrails and gentle sibling residuals are similarly
+  incremental.
+- **The dominant remaining error is intra-lab siblings** (community: 77.78% of
+  errors; ours: 53.3% within provider). gemini-flash variants, glm-5.3↔flash,
+  gpt-5.6 siblings, claude-opus versions. This is a fine-grained style problem.
 
-## 2. The headline lever — exploit the crossed design
+## 2. The real ladder (community tiers, bracketed by official 0.771 and our 0.356)
 
-`test.csv` ships no `prompt_id`, but passages answering the same prompt share
-topic/vocabulary, so prompt groups are **recoverable by semantic clustering**.
-Three label-free ways to isolate style from topic once groups are known:
+| tier | method | reported public BA |
+|---|---|---|
+| 1 | TF-IDF / classical (us) | 0.33–0.42 |
+| 2 | GBDT on stylometry + SVD | 0.39–0.42 |
+| 3 | DeBERTa-v3 sequence head (official only) | 0.39–0.42 |
+| 4 | DeBERTa-v3 + clean external pool | ~0.576 unseen-prompt CV → ~0.66 LB |
+| 5 | Qwen3-8B/14B LoRA multi-depth readouts | 0.55–0.585 |
+| 6 | multi-backbone LoRA stack + pool + calibration | 0.66–0.69 |
+| 7 | + source-conditioned likelihood / GLM token features | 0.69–0.77 |
 
-1. **Within-group centering.** Subtract each prompt group's mean feature/score
-   vector so a passage is judged relative to its prompt-mates, removing topic
-   and prompt-difficulty offsets.
-2. **One-passage-per-model assignment.** The design has ~one passage per model
-   per prompt. Enforce mutual exclusion within a group (Hungarian assignment on
-   the score matrix). This directly attacks the dominant sibling confusions.
-3. **Within-prompt contrastive encoder.** Fine-tune a small encoder to pull
-   same-model passages together *across* prompts and push different-model
-   passages apart *within* a prompt — learning prompt-invariant style directly.
+Tiers are **self-reported** by community sources (not audited), but the official
+top (0.771) and our 0.356 bracket them credibly. We climb one rung at a time,
+validating each on honest k≈2 CV before submitting.
 
-A useful twist: the frozen MiniLM encoder that **failed authorship** (H3, 0.1278
-alone — it captures topic) is exactly the right tool for **prompt clustering**.
+## 3. Phased plan (ordered by impact ÷ cost, within our constraints)
 
-## 3. Phased plan (ordered by impact ÷ cost)
+Constraints: **single account**, CPU-first (GPU notebook ≤9h allowed), **internet
+OFF at inference**, external data/pretrained models allowed if public + attached
+offline, owner-only account actions (rules, download, upload, submit). No leaked
+credentials, no multi-accounting (see `docs/strategy_review.md` §3).
 
-### Phase A — measure the ceiling first (cheap, decisive) — DONE (GO for B)
+### Phase 0 — honest validation + k-robust post-processing — DONE 2026-11-14
 
-Oracle experiments on grouped CV using **known train prompt groups** (upper bound
-assuming perfect test grouping). Implemented in `src/crossed.py` +
-`experiments/phase_a_crossed.py`.
+- Implemented `src/calibration.py` (damped Sinkhorn-Knopp, k-robust, no grouping)
+  + 9 unit tests. Implemented `experiments/stress_k.py` (primary full grouped OOF
+  + k-subsampled **paired-difference stress test** with 95% CIs; replaces
+  `phase_k2_cv.py` per D018) + `metrics.paired_difference`/`mean_ci` (5 tests).
+- **Result (decisive):** the recovered-Hungarian gain is a k=18 artifact.
 
-- **A1-score:** center the blend's OOF scores within prompt groups → argmax.
-- **A2:** one-per-model assignment within prompt groups on the blend's scores.
-- **A1-feature:** retrain `style_only` on within-prompt-centered features
-  (centered on both train and validation sides) → grouped-CV score.
+| split | k | argmax | recovered Hungarian | best Sinkhorn |
+|---|---|---|---|---|
+| cv_s42 | 18 | 0.3760 | **0.4690 (+0.093)** | 0.3767 |
+| cv_s42 | 2 | 0.3607 | 0.3643 (+0.004) | 0.3611 |
+| cv_s42 | 3 | 0.3830 | 0.3835 (+0.001) | 0.3850 |
+| holdout_s7 | 18 | 0.3956 | **0.5000 (+0.104)** | 0.4000 |
+| holdout_s7 | 2 | 0.3872 | 0.3833 (**−0.004**) | 0.3964 |
+| holdout_s7 | 3 | 0.4278 | 0.4238 (−0.004) | 0.4304 |
 
-**Go/no-go:** if the oracle lift is large (≥ +0.05–0.15 over 0.376), the lever is
-real → invest in Phase B (and D). If negligible, pivot to Phase C.
+- **Decision (D017 + D018):** withdraw crossed Hungarian as the submission default;
+  keep the **argmax blend** as the safe baseline. Sinkhorn is implemented and
+  k-robust but ~neutral on the weak blend → reserve it for Phase 4 (on a strong
+  ensemble). **Primary metric for independent-passage models = full prompt-grouped
+  OOF BA** (argmax blend: **0.3760** cv_s42 / 0.3956 examined holdout). The k=1,2,3,18
+  subsampling is an **inference-only stress test** for batch-dependent methods,
+  reported as **paired differences (method − argmax) with 95% CIs** over 10 seeds —
+  not a selection score, and transductive methods stay out of the primary CV. At
+  k=2 the Hungarian paired gain is only +0.0068 [+0.0032,+0.0104] (cv_s42) /
+  +0.0029 [−0.0059,+0.0117] (holdout, CI spans 0); Sinkhorn CIs span 0. The seed-7
+  holdout is **examined**; a fresh seed-2027 holdout is reserved for final selection.
 
-### Phase B — deployable test-time grouping (if A confirms)
+### Phase 1 — clean external pool + stronger base models (highest ROI)
 
-- **B1:** prompt-group recovery — MiniLM / word-TF-IDF embeddings + agglomerative
-  clustering; validate cluster purity against known `prompt_id` on held-out train
-  prompts; tune the distance threshold.
-- **B2:** inference = cluster test → center within clusters → classify (model
-  trained on centered features) → optional assignment constraint.
-- **B3:** validate on a simulated crossed holdout. **Compliance check:** this is
-  transductive but label-free (uses only test text). Confirm the rules permit it;
-  record the ruling in `docs/competition_spec.md` §10 before submitting.
-- **B4:** submit, compare LB (one of 5/day).
+The single biggest lever is **more labelled data + a fine-tuned encoder**, not
+post-processing. All steps validate on honest k≈2 CV + holdout + alternative seed.
 
-### Phase C — stronger base models (parallel, independent of B)
+- **1a — external pool audit + per-fold decontamination (DONE, D019):**
+  `crtproduction/name-that-llm-open-pool` **v15** (2026-11-14, CC BY-SA 4.0, 65
+  sources) registered in `docs/external_data_register.md`. Verified against the
+  actual parquet (`src/pool.py`, `experiments/pool_audit.py`, 9 tests):
+  **226,191 rows**, all 18 labels exact match, 0 null text, uneven
+  (3,541…23,474 → class weights). **Routing-risk flags all False** — the 10,838
+  unverified gemini-3.7 rows are already in `gemini37_unverified.parquet`, so
+  re-filtering `flag_gemini37_routing_risk` is a no-op (corrects the original
+  instruction). Dataset `max_cos_train` ≤ 0.30, 0 exact dups; independent per-fold
+  word-TFIDF cos>0.30 removed **19** rows union → **clean 226,172**
+  (`artifacts/pool_audit/audit.json` + `clean_pool_ids.json`). **Caveats:**
+  `match_weight`/`style_score` fitted on all train → refit per-fold or drop;
+  `flag_kb_proxy_after_ruling` 20,227 (keep by default, optional strict drop);
+  CC BY-SA share-alike. Admission provisional pending the 1b/1c validated gain.
+- **1b — DeBERTa-v3 sequence head (Kaggle GPU ≤9h, offline inference).** The
+  training kernel `kaggle/deberta/deberta_train.py` (self-contained script kernel)
+  fine-tunes `deberta-v3-base` (18-class) on the **same grouped folds**, official-only
+  vs official+clean-pool, with per-fold decontamination (D019), a throughput/memory
+  **benchmark cell** vs the 9h budget, and a stratified **pool cap/fold** (default
+  40k). `--save-final` exports weights for a separate OFFLINE inference notebook.
+  **Prepared** (this session): the offline inference pipeline
+  `kaggle/deberta/predict.py` (loads weights from an attached folder, never
+  downloads; writes valid `submission.parquet` with fail-fast checks), and
+  `kaggle/deberta/requirements_gpu.txt` (pinned GPU deps). `kaggle/deberta/`
+  kernel-metadata.json pushes as a private GPU kernel. All offline-logic tests
+  pass (3/3, `tests/test_offline_submission_artifact.py`). **GPU runs** (private
+  kernel `tiennamlee/name-that-llm-deberta-official-vs-pool-cv`,
+  `kaggle kernels push -p kaggle/deberta`):
+  - **v2 base** (len256, 3ep official / 1ep pool, cap40k): official-only **0.2241**,
+    +pool **0.3049**; pool paired gain **+0.081** [+0.054,+0.108] (real) but **still
+    below the 0.376 sparse blend**. Community ~0.39/~0.576 **not reproduced** at this
+    budget (D022). Fixed the DeBERTa-v3 fp16-gradient crash (`model.float()`).
+  - **v3 large** (len384, batch8, 3ep/2ep, cap20k, lr1e-5): **FAILED** — official-only
+    pooled 0.2245 but **fold 0 collapsed to 0.0537 (~chance)** while folds 1–4 reached
+    0.23–0.31 (training instability near the T4 memory ceiling, peak 13.67 GB); the pool
+    variant then **CUDA-OOM'd** (14.5 GB). Two root causes found: (1) **Kaggle script
+    kernels do NOT upload companion files** — `folds.json` was dropped, so folds were
+    recomputed on Kaggle (not aligned to local cv_s42); (2) large@len384/batch8 exceeds
+    T4 memory in the disentangled attention. Diagnostic only, not a clean comparison.
+  - **v4 large** (len384, **batch4 + gradient checkpointing**, `expandable_segments`,
+    cap12k/fold, 3ep/2ep, lr1e-5, **folds embedded in the script** as a per-row fold-id
+    array verified identical to local cv_s42): **running**. Memory-safe and fold-aligned
+    by construction. Adopt only if it beats 0.376 on CV + the reserved holdout, or adds a
+    validated fold-aligned blend gain (`experiments/blend_deberta.py`, guard accepts
+    `*-embedded`/`*-shipped`).
 
-- **C1:** char n-gram sweep (2–6), vocab/C, sublinear; word+char with scaling.
-- **C2:** richer stylometry — POS n-grams via attached spaCy, syntactic patterns,
-  function-word profiles.
-- **C3:** LightGBM/CatBoost on style + SVD.
-- **C4:** larger diverse ensemble + class-specific intercepts tuned for balanced
-  accuracy on OOF.
+  Offline-inference flow: attach `final_model/` → `HF_HUB_OFFLINE=1
+  python kaggle/deberta/predict.py --model-dir /kaggle/working/deberta_cv/final_model`
+  → `submission.parquet`.
 
-### Phase D — within-prompt contrastive encoder (highest ceiling, heavy)
+  **Package (this session):** the offline artifact dataset lives at
+  `artifacts/kaggle_deberta_offline/` — a self-contained Kaggle dataset folder
+  (no repo checkout at runtime). It ships `predict.py`, `requirements_gpu.txt`,
+  a minimal `src/` (`constants.py` + `submission.py`), `manifest.json`, and
+  `dataset-metadata.json`; `weights/dummy_tiny/` is a reproducible stand-in that
+  fills the offline smoke. The real weights replace `weights/dummy_tiny` via
+  `weights/<final_model>`. Upload-ready bundle content: see
+  `artifacts/kaggle_deberta_offline/README.md` and `dataset-metadata.json`.
+- **1c — GBDT on richer stylometry + multi-view (CPU, DONE — negative standalone):**
+  `gbdt` classifier (sklearn `HistGradientBoostingClassifier`; lightgbm/catboost/
+  xgboost are absent) added to `src/model.py` (+4 tests, dense-input guard) and
+  `configs/gbdt.yaml`. Official-only grouped OOF: **style-only 0.263**,
+  **char+SVD200 0.254**, **multi-view SVD128 0.243** — all **below the 0.376 argmax
+  blend**; SVD compression discards the sparse signal LinearSVC exploits.
+  `experiments/pool_train.py` runs the official-only vs official+pool comparison
+  (per-fold decon, stratified pool cap, paired-diff CI, registry rows). GBDT is a
+  weak standalone here; adopt only if it adds a **validated** blend gain (D007).
+- **1d — multi-view TF-IDF + calibrated LinearSVC:** char_wb 3–5, subword-boundary
+  and punctuation-cadence views; blend with 1b/1c. CPU-feasible.
 
-- **D1:** fine-tune a small encoder with a (prompt, model)-keyed contrastive /
-  triplet loss; attach weights for offline CPU inference.
-- **D2:** grouped-CV validate, blend.
+### Phase 2 — multi-backbone cached-embedding readouts (heavier GPU)
 
-### Phase E — sibling discrimination
+- Cache multi-layer hidden states from Qwen3-8B/14B (depths [2,4,6,8,12,16,20,24]),
+  LayerNorm-standardised, content-token pooled; fit ridge/logreg heads on official
+  + clean pool. Community ~0.55–0.585. Single-account GPU, offline weights.
+- Centred-twin / shared-prompt readouts only where prompt groups are reliable
+  (train-side); do **not** assume test-time groups at k≈2.
 
-- **E1:** hierarchical provider→version classification; provider-conditional
-  features targeting gemini-flash variants, glm-5.3↔flash, gpt-5.6 siblings.
-- **E2:** length-band analysis (short passages are the likely weak spot).
+### Phase 3 — source-conditioned likelihood (optional, cross-family signal)
 
-## 4. Validation discipline (unchanged)
+- ATLAS-style `P(text|model)` with per-source LoRA + clipped token likelihoods,
+  applied only to contested rows (top-2 margin < ~0.32) at low weight (~0.20).
+  **Caveat:** ATLAS is strongest cross-family; our errors are intra-lab siblings,
+  so expect modest gains. Verify on honest CV before adopting. Heavy; defer.
 
-- Every change measured on the **frozen grouped folds + secondary holdout**,
-  never tuned on the LB. Each experiment gets a registry row + ADR.
-- LB is confirmation only (5 submits/day, 2 final). Owner-only account actions.
-- Transductive methods are reported explicitly and kept **label-free**; they are
-  never applied inside reported grouped-CV *training* scores. The Phase A oracle
-  uses known train prompt groups only to measure the ceiling, and is labelled
-  `oracle` (not a deployable CV score).
+### Phase 4 — k-robust post-processing ON TOP of the strong ensemble
 
-## 5. Results
+- Damped Sinkhorn (`src/calibration.py`): sweep strength 0.3–0.6, target_mix 0.35
+  on honest k≈2 CV of the strong ensemble; adopt only on validated gain.
+- Typography guardrails: verify provider-invariant tokens on **train** first
+  (e.g. curly quotes / em-dash patterns); apply as soft penalties, not blind masks.
+- Gentle sibling residual heads (max_alpha ≤ 0.08) targeting the dominant sibling
+  confusions; preserve cross-family probability mass.
 
-_Filled in as experiments land. All numbers local grouped-CV unless labelled._
+### Phase 5 — sibling discrimination (throughout)
 
-### Phase A (oracle ceiling) — DONE 2026-11-14
+- Hierarchical provider→version features; provider-conditional models for
+  gemini-flash, glm-5.3↔flash, gpt-5.6 siblings, claude-opus versions.
+- Length-band analysis (short passages are a likely weak spot).
 
-Oracle = known train prompt groups (perfect grouping assumed). **Not deployable
-CV scores**; the deployable version needs test-time group recovery (Phase B).
-Source: `artifacts/phase_a/results.json`, registry rows `phase_a_*`, ADR D014.
+## 4. Validation discipline (updated)
 
-| experiment | pooled bal. acc | Δ vs 0.3760 | note |
-|---|---|---|---|
-| baseline blend (argmax) | 0.3760 | — | reference |
-| A1-score: within-prompt score centering | 0.4152 | +0.0392 | oracle |
-| A2: one-per-model assignment | 0.4853 | **+0.1093** | oracle, dominant lever |
-| A1-score + A2 combined | 0.4860 | +0.1100 | oracle ceiling |
-| A1-feature: style retrained on centered features | 0.3575 | +0.0671 vs style 0.2904 | deployable-consistent, ±0.0099 |
+- **Primary metric (independent-passage models) = full prompt-grouped OOF BA**
+  (pooled over all rows, plus per-fold mean ± std). This is the main comparison for
+  the argmax blend, DeBERTa, GBDT, etc. **k=1,2,3,18 subsampling is a stress test**
+  for batch/group-dependent methods only: report paired differences (method −
+  argmax) with mean ± std and a 95% CI over ≥10 subsample seeds, on fixed
+  pre-registered settings (never a best-of grid). Confirm any candidate on the
+  examined holdout + ≥1 alternative fold seed; reserve the fresh seed-2027 holdout
+  for final selection. k=18 grouped CV is a training-side fit diagnostic, not an LB
+  proxy (community r≈0.13 vs r≈0.91 for k≈2; locally the Hungarian-gain collapse
+  confirms the k sensitivity).
+- Every change gets a registry row + ADR. Never tune on the LB. LB is confirmation
+  only (5 submits/day, 2 final). Owner-only account actions.
+- Transductive methods stay label-free and are never applied inside reported
+  grouped-CV *training* scores. Post-processing is evaluated only on the
+  k-subsampled **stress test** (paired diffs + CI), never as a primary score.
 
-Per-single oracle (assignment): char 0.3193 → 0.4138; style 0.2904 → 0.3401.
+## 5. Compliance posture
 
-**Decision: GO for Phase B.** The crossed-design lever is real and large
-(+0.11 oracle on the blend). One-per-model assignment dominates and directly
-attacks the sibling-confusion errors; score centering is secondary; centered
-features also make the style model itself stronger. The realised gain hinges on
-test-time prompt-group recovery purity, which B1 must validate before submitting.
-Compliance gate (transductive but label-free) recorded in D014 / spec §10.
+- Single account; no leaked credentials; no multi-account quota evasion.
+- No competition rows to hosted assistants; no runtime downloads; offline weights.
+- External data registered + decontaminated + validated on grouped folds before use.
+- Owner accepts rules, downloads data, uploads artifacts, and submits.
 
-### Phase B (recovered grouping) — B1/B2 simulation DONE 2026-11-14
+## 6. Historical results (superseded framing)
 
-Deployable-consistent grouped CV: embed each fold's validation passages with
-frozen MiniLM, cluster **without** `prompt_id`, apply transforms on recovered
-groups. Source: `artifacts/phase_b/results.json`, registry `phase_b_*`, ADR D015.
+Phase A oracle (known train groups, k=18) and Phase B recovered-grouping results
+(ADR D014–D016) remain valid **as k=18 oracle/train-side measurements** but are
+**not deployable estimates for a k≈2 test**. The D016 "adopt crossed inference"
+decision is **retracted by D017**; D018 reframes the k-subsampled evaluation as an
+inference-only stress test (primary = full OOF). See `experiments/registry.csv`
+(`phase_a_*`, `phase_b_*`, `phase_k2_*` historical; `stress_*` current) and
+`artifacts/stress_k/results.json` (current), `artifacts/phase_k2/results.json`
+(historical).
 
-| grouping config | purity | ARI | strict recovery | argmax | oracle assign | recovered assign | rec center+assign |
-|---|---|---|---|---|---|---|---|
-| k = rows/18 | 0.934 | 0.916 | 0.833 | 0.3760 | 0.4853 | **0.4727** | 0.4756 |
-| cosine thr 0.4 | 0.989 | 0.944 | 0.753 | 0.3760 | 0.4853 | 0.4704 | 0.4649 |
-| cosine thr 0.5 | 0.940 | 0.921 | 0.833 | 0.3760 | 0.4853 | 0.4690 | 0.4741 |
+## 7. Immediate next action
 
-**Result: recovered-group assignment captures +0.0967 of the +0.1093 oracle gain
-(88%).** Assignment alone is robust to imperfect clustering; centering adds little
-and hurts when clusters are wrong → use **assignment-only**. The `k = rows/18`
-prior works best and needs no threshold tuning; the threshold variant confirms
-robustness when the design is uncertain.
-
-**Decision: the lever is deployable in principle.** Remaining before adoption
-(D015): (1) compliance gate — **CLEARED 2026-11-14**: the Rules forbid only
-hand-labelling/human prediction of test records (Foundational §4.b), not
-label-free feature-space clustering; §6 allows public pretrained models/AMLT; no
-transductive prohibition (spec §9); (2) full cluster→assign validation on the
-secondary holdout + an alternative seed; (3) k-estimate sensitivity /
-larger-batch check (real test ~4,000 rows vs ~540 per fold here). The pipeline
-now depends on MiniLM → weights must be attached offline
-(`docs/external_data_register.md` updated).
-
-### Phase B validation (holdout + alternative seeds) — DONE 2026-11-14
-
-Full cluster→assign pipeline refit per fold on three independent splits (blend
-members + 0.5/0.5 weights fixed; only grouping + assignment added at inference).
-Source: `artifacts/phase_b/validation.json`, registry `phase_b_*_rec_thr`, ADR
-D016.
-
-| split | argmax | oracle assign | recovered thr 0.4 | recovered k=rows/18 | purity (k) |
-|---|---|---|---|---|---|
-| untouched holdout s7 (25 prompts) | 0.3956 | 0.4933 | **0.5000** | 0.4933 | 1.000 |
-| grouped CV seed 7 | 0.3608 | 0.4808 | 0.4716 | 0.4712 | 0.940 |
-| grouped CV seed 13 | 0.3582 | 0.4742 | 0.4657 | 0.4631 | 0.940 |
-
-**Result: the gain holds out of sample on every split** (+0.1044 holdout, +0.1108
-seed 7, +0.1075 seed 13). Holdout argmax 0.3956 exactly reproduces D012 →
-harness correct. Threshold 0.4 ≥ k-estimate on all three splits and keeps the
-highest purity at scale → **adopt thr 0.4** (no rows/prompt assumption).
-
-Scale check (2,699 passages / 150 prompts, no accuracy): k=150 purity 0.891;
-thr 0.4 purity 0.960 (216 clusters, over-splits but pure); thr 0.5 purity 0.871.
-Purity degrades gracefully; over-splitting pure clusters is harmless to
-assignment, impure merges are the failure mode thr 0.4 avoids.
-
-**Decision: D015 gates satisfied → adopt crossed inference as the submission
-candidate (D016), superseding the argmax blend pending the owner's LB
-submission.** Deployable path `src.inference.predict_dataframe_crossed` is
-implemented and tested. Remaining: productionize (CLI `--crossed`, notebook
-loads attached MiniLM offline, `package` ships the checkpoint), then owner
-submits and we read the LB.
-
-### Phase B productionization — DONE 2026-11-14
-
-The crossed candidate is packaged and verified end-to-end offline:
-
-- `src.cli predict --crossed` (flags `--distance-threshold` 0.4, `--n-clusters`,
-  `--encoder-backend`, `--encoder-path`) calls `predict_dataframe_crossed`.
-- `src.cli package --crossed` ships the MiniLM checkpoint (`encoder/minilm`,
-  88 MB) + `inference.json` (`crossed`, `encoder_path`, `distance_threshold` 0.4)
-  alongside the blend bundles, `weights.json` and `src/`. Auto-resolves the HF
-  cache offline (`snapshot_download(local_files_only=True)`) or takes
-  `--encoder-path`.
-- `kaggle/submission.ipynb` sets `HF_HUB_OFFLINE=1`, reads `inference.json`, loads
-  the encoder from the attached folder and runs crossed inference; falls back to
-  argmax when `inference.json` is absent.
-- `make predict-crossed` / `make package-crossed` (reuse `configs/submission.yaml`;
-  no duplicate config, avoiding member drift per D011).
-
-Verification: the packaged `src` unpickles the bundles, MiniLM loads with
-`HF_HUB_OFFLINE=1` (no network), and the notebook cells execute end-to-end. At
-2,699-row scale (all train passages as an unlabelled proxy batch) crossed
-inference runs in **~56 s CPU** and yields a near-uniform label distribution
-(max class share **0.056 ≈ 1/18**) — the full-factorial signature, confirming
-assignment works at scale. 111 unit tests pass (3 new: CLI crossed ×2, package
-crossed ×1).
-
-Caveats: the public `test.csv` is a **3-row format sample** (spec §10); the real
-~4,000-row hidden test is only available on Kaggle, so full-scale accuracy cannot
-be measured locally — the 2,699-row train proxy + holdout/seed gains are the
-available evidence. The bundles were refit with current code (the earlier
-`final/official` pickle predated the `_encoder` attribute and failed to load);
-config/seed/data are unchanged so the blend is equivalent. The crossed pipeline
-needs `sentence-transformers` (+ `transformers`, `torch`) importable in the Kaggle
-image; the weights are attached, never downloaded.
-
-**Next: owner uploads `artifacts/kaggle_dataset_crossed` (set `--kaggle-user`),
-attaches it to the notebook, submits, and reads the LB.** If it beats 0.356,
-proceed to Phase C/D to push toward 0.7; if clustering collapses on the real test
-(degenerate label distribution), fall back to the argmax blend.
+**Phase 1a/1b:** prepare the external-pool decontamination + DeBERTa fine-tuning
+pipeline (code + offline-attach packaging), validate on honest k≈2 CV, and hand the
+owner a single-account GPU notebook. The argmax blend remains the safe fallback
+submission until a stronger base model is validated. Do **not** submit the crossed
+Hungarian candidate.

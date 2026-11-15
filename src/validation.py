@@ -137,7 +137,11 @@ def fold_groups(df: pd.DataFrame, folds) -> list[dict]:
 def make_holdout(
     df: pd.DataFrame, n_groups: int = 25, seed: int = 7
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Secondary prompt-held-out split, untouched by model selection."""
+    """Secondary prompt-held-out split for robustness checks, not for selection.
+
+    The default seed-7 holdout has been examined (D015-D017); a fresh seed-2027
+    holdout is reserved for final selection (D018, ``stress_k.py``).
+    """
     prompts = np.asarray(sorted(pd.unique(df["prompt_id"].astype(str))))
     if n_groups >= len(prompts):
         raise ValueError("holdout would consume every prompt")

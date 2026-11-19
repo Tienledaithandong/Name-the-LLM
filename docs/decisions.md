@@ -2140,6 +2140,69 @@ on the outer holdout. The replay evaluates the whole selection procedure,
 and all prompts have been explored before this project phase. It does not
 by itself establish an untouched evaluation of a fixed encoder-only choice.
 
+## D058 — Self-neutralized style residual is refuted at P0 (2026-11-19)
+
+Approach A of the [design doc](../superpowers/specs/2026-11-19-style-residual-distillation-design.md)
+replaces the non-deployable Prompt-Neutralized Embedding with a learner: a
+ridge regressor `g` predicts a passage's own prompt mean from that passage, and
+the representation becomes `e - lambda * g(e)`. It is deployable at any k because
+it never sees a sibling. The spec required this to be falsified on CPU before any
+GPU spend, against **D010**, whose global projection of the top between-prompt
+directions is a special case of the same idea and was already published as a
+negative result.
+
+Pre-check (`artifacts/residual/headroom.json`, `python -m experiments.residual_headroom`,
+2699 rows / 150 prompts): the share of feature variance explained by prompt
+identity is **0.2587** for the 56 style features, **0.8449** for `char` TF-IDF
+reduced to 128 SVD components, and **0.3494** for the 384-dimensional hashing
+embedding. This is a property of the labelled data, not a CV score.
+
+Screen (`python -m experiments.run_residual_cv --splits
+artifacts/splits/splits_official_verified_s42.json`, split
+`stratified_group-s42-n5`, 2699 rows, 629.92 s, `30bc1ef`). One fixed
+`LogisticRegression(C=1.0, class_weight=balanced)` in every cell, so only the
+representation transform differs. Lambda chosen per fold by inner prompt-grouped
+CV on the training side, then refit on the whole training side.
+
+| space | none | D010 (k=4) | learned g | oracle centring |
+|---|---|---|---|---|
+| style | 0.2897 | 0.2856 | 0.2863 | 0.3575 |
+| svd128 | 0.2293 | **0.2563** | 0.2215 | 0.2982 |
+| embedding | 0.1967 | 0.1841 | **0.2004** | 0.2393 |
+
+Learned-`g` diagnostics: out-of-fold `R^2` of predicting a row's prompt mean was
+**0.316 / 0.259 / 0.255 / 0.278** in style space, **-0.243 / -0.243 / -0.236 /
+-0.228** in svd128, and **-0.012 / -0.025 / -0.011 / -0.025** in embedding space
+(one value per fold that selected lambda > 0). The removed-component ratio
+`mean ||lambda*g(e)|| / mean ||e - mean||` was 0.08-0.34 for style, up to 0.85
+for svd128 and up to 0.38 for embedding.
+
+Verdict: **A is refuted at P0, and no GPU work follows** (spec section 5).
+
+- The learned neutralizer never beats D010 by a meaningful margin on the space
+  where D010 helps. In `svd128`, D010 gains **+0.0270** over no transform while
+  learned `g` loses **-0.0078**; a large predicted component (ratio up to 0.85)
+  with a negative `R^2` means the neutralizer subtracts a confidently wrong mean.
+- Style space is the only one where the prompt mean is genuinely recoverable
+  (`R^2` 0.26-0.32), yet the removal ratio stays low and the classifier does not
+  benefit: 0.2863 versus 0.2897 untransformed, with per-fold deltas
+  **-0.002 / 0.000 / +0.002 / -0.004 / -0.013**.
+- The two positive-looking cells (embedding 0.2004 vs 0.1967, style learned vs
+  D010 +0.0007) are inside fold noise and do not survive the four-of-five-fold
+  rule, let alone the seed-13 gate.
+- These are single-view logistic cells. They are not directly comparable with the
+  adopted 0.3760 two-member blend, and the gate comparison that matters here is
+  within-space: every learned cell is at or below its own untransformed control,
+  and the spec's condition that learned `g` beat the D010 projection fails.
+
+The oracle ceiling is retained as the measured headroom: exact within-prompt
+centring still reaches 0.3575 on style features, so the between-prompt component
+is worth removing *when the groups are known*. The failure is specifically that a
+single passage cannot predict its own prompt's mean well enough to do it without
+them. The `PromptMeanNeutralizer` and the `residual_lambda` builder stage stay in
+the tree as tested infrastructure; no config enables them by default and no
+submission uses them.
+
 The nested replay scored **0.373743** versus **0.351892** for the matched
 baseline, a gain of **+0.021852** (paired prompt interval
 **[+0.010720, +0.033704]**). It chose the frozen blend in two outer folds and

@@ -18,8 +18,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 
 from src.features_embedding import FrozenEncoder
+from src.features_multilayer import MultiLayerReadoutBuilder
 from src.features_style import StyleFeatureExtractor
 from src.prompt_invariance import NuisanceSuppressor
+from src.residual import PromptMeanNeutralizer
 
 TFIDF_KINDS = ("char", "word", "char_wb")
 
@@ -82,29 +84,46 @@ class TextMatrixBuilder:
         nuisance_k: int = 0,
         nuisance_min_group: int = 4,
         embedding: dict[str, Any] | None = None,
+        multilayer: dict[str, Any] | None = None,
+        residual_lambda: float = 0.0,
+        residual_alpha: float = 1.0,
     ):
         self.kinds = tuple(kinds)
         self.style = bool(style)
         self.embedding = dict(embedding) if embedding else None
-        if not self.kinds and not self.style and not self.embedding:
+        self.multilayer = dict(multilayer) if multilayer is not None else None
+        if not self.kinds and not self.style and not self.embedding and not self.multilayer:
             raise FeatureError(
-                "builder needs at least one tf-idf kind, style features, or an embedding"
+                "builder needs at least one tf-idf kind, style features, an embedding, "
+                "or a multi-layer readout builder"
             )
         for kind in self.kinds:
             if kind not in TFIDF_KINDS:
                 raise FeatureError(f"unknown tf-idf kind {kind!r}")
         if nuisance_k and not svd:
             raise FeatureError("nuisance suppression requires an SVD reduction (dense space)")
+        residual_lambda = float(residual_lambda)
+        if not 0.0 <= residual_lambda <= 1.0:
+            raise FeatureError("residual_lambda must be in [0, 1]")
+        if residual_lambda and not svd and self.kinds:
+            raise FeatureError(
+                "residual neutralisation requires dense input — set an svd size "
+                "or use style-only features"
+            )
         self.params = {**DEFAULT_PARAMS, **(params or {})}
         self.svd = svd
         self.nuisance_k = int(nuisance_k)
         self.nuisance_min_group = int(nuisance_min_group)
+        self.residual_lambda = residual_lambda
+        self.residual_alpha = float(residual_alpha)
+        self.residual_: PromptMeanNeutralizer | None = None
         self._vectorizers: list[TfidfVectorizer] = []
         self._style_extractor: StyleFeatureExtractor | None = None
         self._style_scaler: StandardScaler | None = None
         self._svd: TruncatedSVD | None = None
         self._suppressor: NuisanceSuppressor | None = None
         self._encoder: FrozenEncoder | None = None
+        self._multilayer: MultiLayerReadoutBuilder | None = None
         self._embedding_dim: int | None = None
         self._fitted = False
 
@@ -134,12 +153,24 @@ class TextMatrixBuilder:
         self._embedding_dim = int(emb.shape[1])
         return sparse.csr_matrix(emb)
 
+    def _multilayer_block(self, texts) -> np.ndarray:
+        """Multi-layer causal readout, returned as a dense float32 block.
+
+        The block is a pure function of text plus the frozen backbone, so it
+        carries no label information and is fitting-safe across folds.
+        """
+        return np.asarray(
+            self._multilayer.transform(list(texts)), dtype=np.float32
+        )
+
     def _raw(self, texts) -> sparse.csr_matrix:
         blocks = [vec.transform(texts) for vec in self._vectorizers]
         if self._style_extractor is not None:
             blocks.append(self._style_block(texts))
         if self._encoder is not None:
             blocks.append(self._embedding_block(texts))
+        if self._multilayer is not None:
+            blocks.append(self._multilayer_block(texts))
         return sparse.hstack(blocks, format="csr").astype(np.float32)
 
     def _reduce(self, matrix: sparse.csr_matrix, groups=None, fit: bool = False):
@@ -157,6 +188,23 @@ class TextMatrixBuilder:
                     n_components=self.nuisance_k, min_group_size=self.nuisance_min_group
                 ).fit(dense, groups)
             matrix = self._suppressor.transform(dense)
+        if self.residual_lambda > 0:
+            if fit and groups is None:
+                raise FeatureError("residual neutralisation needs prompt groups to fit")
+            dense = (
+                matrix.toarray()
+                if sparse.issparse(matrix)
+                else np.asarray(matrix, dtype=np.float32)
+            )
+            if fit:
+                self.residual_ = PromptMeanNeutralizer(
+                    alpha=self.residual_alpha, shrinkage=self.residual_lambda
+                ).fit(dense, groups)
+            if self.residual_ is None:
+                raise FeatureError(
+                    "residual neutralisation was configured but no neutralizer was fitted"
+                )
+            matrix = self.residual_.transform(dense)
         return matrix
 
     # -- public API --------------------------------------------------------
@@ -172,6 +220,9 @@ class TextMatrixBuilder:
             else None
         )
         self._encoder = FrozenEncoder(**self.embedding) if self.embedding else None
+        self._multilayer = (
+            MultiLayerReadoutBuilder(**self.multilayer) if self.multilayer else None
+        )
         self._svd = (
             TruncatedSVD(
                 n_components=int(self.svd), random_state=0, algorithm="randomized"
@@ -205,6 +256,8 @@ class TextMatrixBuilder:
         if self._encoder is not None:
             dim = self._embedding_dim or int(self.embedding.get("dim", 0))
             names.extend(f"emb:{i}" for i in range(dim))
+        if self._multilayer is not None:
+            names.extend(f"multilayer:{i}" for i in range(self._multilayer.dim))
         if self._svd is not None:
             return np.asarray([f"svd_{i}" for i in range(self._svd.n_components)], dtype=object)
         return np.asarray(names, dtype=object)

@@ -152,3 +152,33 @@ def test_gbdt_multiview_svd_bundle(train_df):
     scores = bundle.decision_function(subset["text"].head(5).tolist())
     assert scores.shape == (5, N_CLASSES)
     assert np.isfinite(scores).all()
+
+
+def test_model_spec_round_trips_residual_fields():
+    spec = ModelSpec.from_dict(
+        {"name": "r", "features": [], "style": True, "residual_lambda": 0.5}
+    )
+    assert spec.residual_lambda == 0.5 and spec.residual_alpha == 1.0
+    assert ModelSpec.from_dict(spec.to_dict()).residual_lambda == 0.5
+
+
+def test_model_spec_rejects_sparse_residual():
+    with pytest.raises(ModelError, match="residual"):
+        ModelSpec.from_dict({"name": "r", "features": ["char"], "residual_lambda": 0.5})
+    with pytest.raises(ModelError, match="residual_lambda"):
+        ModelSpec.from_dict({"name": "r", "features": [], "style": True, "residual_lambda": 2.0})
+
+
+def test_residual_bundle_carries_fitted_neutralizer(train_df):
+    subset = train_df.groupby("model", observed=True).head(6).reset_index(drop=True)
+    cfg = {"name": "resid", "features": [], "style": True, "residual_lambda": 0.5}
+    bundle = estimator_from_config(cfg, seed=0)
+    bundle.fit(
+        subset["text"].tolist(),
+        labels_to_indices(subset["model"].tolist()),
+        groups=subset["prompt_id"].astype(str).tolist(),
+    )
+    assert bundle.builder.residual_ is not None
+    scores = bundle.decision_function(subset["text"].head(4).tolist())
+    assert scores.shape == (4, N_CLASSES) and np.isfinite(scores).all()
+    assert tuple(bundle.class_order) == LABELS

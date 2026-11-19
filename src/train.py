@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 
 from src.constants import DEFAULT_REGISTRY, LABELS, N_CLASSES, RANDOM_STATE
-from src.data import indices_to_labels, labels_to_indices
+from src.data import dataset_fingerprint, indices_to_labels, labels_to_indices
+from src.validation import validate_splits
 from src.metrics import aggregate_folds, evaluate
 from src.model import estimator_from_config
 from src.repro import env_snapshot, git_commit
@@ -83,6 +84,7 @@ def run_cv(
     save_fold_models: bool = False,
 ) -> list[dict]:
     """Fit every model on every fold; persist OOF scores and metrics."""
+    validate_splits(train_df, folds)
     out_dir = Path(out_dir)
     (out_dir / "oof").mkdir(parents=True, exist_ok=True)
     (out_dir / "metrics").mkdir(parents=True, exist_ok=True)
@@ -91,6 +93,10 @@ def run_cv(
     groups = train_df["prompt_id"].astype(str).to_numpy()
     y_idx = labels_to_indices(train_df["model"].tolist())
     y_labels = indices_to_labels(y_idx)
+
+    fold_ids = np.empty(len(train_df), dtype=np.int64)
+    for fold, (_, valid_idx) in enumerate(folds):
+        fold_ids[valid_idx] = fold
 
     results: list[dict] = []
     for raw in model_configs:
@@ -135,7 +141,11 @@ def run_cv(
             oof_path,
             scores=scores,
             y=y_idx,
-            labels=np.asarray(LABELS, dtype=object),
+            labels=np.asarray(LABELS, dtype=str),
+            row_ids=train_df["id"].astype(str).to_numpy(dtype=str),
+            fold_ids=fold_ids,
+            dataset_fingerprint=dataset_fingerprint(train_df),
+            config=json.dumps(raw, sort_keys=True),
         )
         payload = {
             "model": name,

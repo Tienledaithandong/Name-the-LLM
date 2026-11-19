@@ -11,10 +11,16 @@ Competition: <https://www.kaggle.com/competitions/name-that-llm>
 > argmax blend (`0.5 × char + 0.5 × style`, 0.3760 pooled OOF) → **0.356 public
 > LB** (top score 0.7). A **crossed-design candidate** (ADR D016) adds test-time
 > prompt-group recovery + one-per-model assignment and is validated at **0.5000**
-> on the untouched holdout and **0.4716 / 0.4657** on alternative fold seeds; it
+> on the historical secondary split and **0.4716 / 0.4657** on alternative fold seeds; it
 > is packaged and ready, **pending the owner's submission**. See
 > `docs/improvement_plan.md`. Synthetic-fixture numbers are retained only as a
 > pipeline check and are labelled as such.
+
+**Validation caveat:** historical CV, secondary-split, and crossed-design
+scores used data that was also available during model/blend selection. The
+secondary split was not reserved before selection, so these are exploratory
+robustness results, not an independent final estimate. See
+`docs/experiment_protocol.md` for the new pre-reservation workflow.
 
 ## What is verified vs. assumed
 
@@ -71,11 +77,23 @@ Key properties:
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pytest -q            # 111 tests
+python -m pytest -q
 ```
 
-Python 3.11+ (developed on 3.13). Versions are pinned in
-`requirements-lock.txt`.
+Python 3.11+. `requirements.txt` installs compatible minimum versions (and may
+resolve newer ones); `requirements-lock.txt` records the historical Python 3.13
+development environment, not a cross-platform lock. For a matching environment,
+try `python -m pip install -r requirements-lock.txt`; availability depends on
+platform and Python version. Crossed inference additionally requires
+`sentence-transformers` and a locally attached MiniLM checkpoint.
+
+**Artifact migration:** older split files, OOF matrices and blend weights lack
+required provenance and must be regenerated. Existing final models must be refit
+with the current resolved configuration. Multiple models without verified
+weights fail closed; `predict --allow-equal-weights` is an explicit unvalidated
+fallback. Package output directories are no longer overwritten unless
+`--overwrite` is passed. Only load trusted joblib artifacts. Historical macro-F1 figures may be inflated
+by the old zero-class omission; regenerate metrics to update them.
 
 ## Reproducibility
 
@@ -198,7 +216,7 @@ transductive inference step. The blend members and weights are unchanged.
 
 | split | argmax blend | recovered-group assignment (cosine thr 0.4) | gain |
 |---|---|---|---|
-| untouched holdout (25 prompts, seed 7) | 0.3956 | **0.5000** | +0.1044 |
+| historical secondary split (25 prompts, seed 7) | 0.3956 | **0.5000** | +0.1044 |
 | grouped CV seed 7 | 0.3608 | 0.4716 | +0.1108 |
 | grouped CV seed 13 | 0.3582 | 0.4657 | +0.1075 |
 | grouped CV seed 42 (reference) | 0.3760 | 0.4704 | +0.0944 |

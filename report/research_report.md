@@ -1,5 +1,9 @@
 # Prompt-robust stylometric attribution of frontier language models
 
+> **Validation caveat (review):** historical secondary-split results are
+> exploratory, not independent: their prompts were included in the data used
+> for CV/model selection. See `docs/experiment_protocol.md` for pre-reservation.
+
 **Technical report — draft, 2026-11-14. Not a peer-reviewed publication.**
 
 **Status:** methods implemented, tested and evaluated on the official training
@@ -31,7 +35,7 @@ concentrate within providers (53.3% of errors), with sibling flash models the
 most confused pair. A D016 research track recovered the crossed-design signal
 through test-time prompt grouping: cluster test passages by frozen-miniLM topic
 embedding into prompt groups, then enforce one-per-model Hungarian assignment.
-This is the **adopted** submission candidate: it scores 0.5000 on the untouched
+This is the **adopted** submission candidate: it scores 0.5000 on the historical secondary
 holdout (+0.1044) and 0.4716/0.4657 on grouped CV seeds 7/13 (+0.1108/+0.1075),
 capturing ~88% of the oracle ceiling. The char+style blend is retained as the
 fallback single-model candidate.
@@ -199,7 +203,7 @@ its job, and it motivates H1/H2 rather than settling them.
 |---|---|
 | H1: character/typography features generalise better across prompts than semantic word features | **partially supported on official data**: char 0.3167 vs word 0.2697 (+0.047), and `char_wb` 0.2963 also beats word. Style alone (0.2904) is close to char. |
 | H2: prompt-invariance techniques improve grouped validation | **not supported as configured**: deployable nuisance suppression (k=8) lowers pooled OOF for char (0.3034→0.2434) and style (0.2904→0.2737); SVD-256 compression alone also slightly lowers char (0.3167→0.3034). See §6.4. |
-| H3: frozen encoders complement sparse stylometry | **measured, not supported for adoption**: a frozen MiniLM encoder scores 0.1278 alone and 0.3093 with style; the greedy char+encoder blend gains only +0.0026 on CV (0.3786 vs 0.3760) and *reverses* on the untouched holdout (0.3933 vs 0.3956). Not adopted. See §6.6. |
+| H3: frozen encoders complement sparse stylometry | **measured, not supported for adoption**: a frozen MiniLM encoder scores 0.1278 alone and 0.3093 with style; the greedy char+encoder blend gains only +0.0026 on CV (0.3786 vs 0.3760) and *reverses* on the historical secondary split (0.3933 vs 0.3956). Not adopted. See §6.6. |
 | H4: within-provider confusions dominate | **supported**: 897 of 1,684 blend errors stay inside a provider (53.3%), and the top confusion pairs are siblings (`gemini-3.8-flash`→`gemini-3.7-flash` 56, `gemini-3.6-flash`→`gemini-3.7-flash` 40, `glm-5.3-flash`↔`glm-5.3` 35+). |
 
 ### 6.4 Prompt-invariance ablation (H2, deployable nuisance suppression)
@@ -258,7 +262,7 @@ gain was re-measured on other prompt partitions without re-tuning anything
 
 Greedy selection returned the identical 0.5/0.5 char+style weights on both
 alternative seeds, and the gain is positive on every partition including the
-untouched holdout. The D009 adoption condition therefore holds and the blend
+historical secondary split. The D009 adoption condition therefore holds and the blend
 remains the submission candidate. The holdout gain (+0.0222) is smaller than the
 CV gains, consistent with mild selection optimism on the CV folds, but clearly
 positive. On the holdout the char member alone scores 0.3733 and style 0.2822,
@@ -279,7 +283,7 @@ evaluation gate is the *recoveries* section of D016:
 
 || split | argmax (blend only) | recovered, thr 0.4 | recovered, k=rows/18 | purity (thr 0.4) |
 |---|---|---|---|---|---|
-| untouched holdout (25 prompts / 450 rows) | 0.3956 | **0.5000** | 0.4933 | 1.000 |
+| historical secondary split (25 prompts / 450 rows) | 0.3956 | **0.5000** | 0.4933 | 1.000 |
 | grouped CV seed 7 | 0.3608 | **0.4716** | 0.4712 | 0.980 |
 | grouped CV seed 13 | 0.3582 | **0.4657** | 0.4631 | 0.990 |
 
@@ -338,7 +342,7 @@ embeddings+style} selects `0.5 × char + 0.5 × (embeddings+style)` at **0.3786*
 pooled OOF — only **+0.0026** over the adopted char+style blend. Adding the
 weak embeddings-only model to the blend instead *hurts* (equal-weight
 char+style+embeddings = 0.3182). Because the +0.0026 was selected on the same
-OOF, it was checked on the untouched secondary holdout (25 prompts / 450 rows,
+OOF, it was checked on the historical secondary holdout (25 prompts / 450 rows,
 seed 7) with fixed 0.5/0.5 weights:
 
 | blend | CV pooled OOF (seed 42) | secondary holdout |

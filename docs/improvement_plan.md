@@ -1,5 +1,9 @@
 # Improvement plan — 0.356 → 0.7
 
+> **Validation caveat (review):** historical secondary-split results are
+> exploratory, not independent: their prompts were included in the data used
+> for CV/model selection. See `docs/experiment_protocol.md` for pre-reservation.
+
 > **Status (2026-11-14):** active. Public LB **0.356** (owner submission of the
 > argmax blend), top score **0.7**. Argmax blend = `0.5 × char_tfidf_logreg +
 > 0.5 × style_only`, pooled grouped-CV **0.3760**. The **crossed-design candidate**
@@ -166,7 +170,7 @@ D016.
 
 | split | argmax | oracle assign | recovered thr 0.4 | recovered k=rows/18 | purity (k) |
 |---|---|---|---|---|---|
-| untouched holdout s7 (25 prompts) | 0.3956 | 0.4933 | **0.5000** | 0.4933 | 1.000 |
+| historical secondary split s7 (25 prompts) | 0.3956 | 0.4933 | **0.5000** | 0.4933 | 1.000 |
 | grouped CV seed 7 | 0.3608 | 0.4808 | 0.4716 | 0.4712 | 0.940 |
 | grouped CV seed 13 | 0.3582 | 0.4742 | 0.4657 | 0.4631 | 0.940 |
 

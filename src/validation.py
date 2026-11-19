@@ -33,6 +33,7 @@ def make_splits(
     n_splits: int = 5,
     seed: int = 42,
     method: str = "auto",
+    shuffle: bool = True,
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
     """Build prompt-grouped folds.
 
@@ -56,7 +57,7 @@ def make_splits(
 
     if chosen == "stratified_group":
         splitter = StratifiedGroupKFold(
-            n_splits=n_splits, shuffle=True, random_state=seed
+            n_splits=n_splits, shuffle=shuffle, random_state=seed if shuffle else None
         )
         try:
             folds = [
@@ -88,6 +89,13 @@ def validate_splits(
     prompts = df["prompt_id"].astype(str).to_numpy()
     covered = np.zeros(len(df), dtype=bool)
     for i, (train_idx, valid_idx) in enumerate(folds):
+        for side in (train_idx, valid_idx):
+            if np.asarray(side).ndim != 1 or not np.issubdtype(np.asarray(side).dtype, np.integer):
+                raise LeakageError(f"fold {i} indices must be one-dimensional integers")
+            if np.any(side < 0) or np.any(side >= len(df)) or len(np.unique(side)) != len(side):
+                raise LeakageError(f"fold {i} has invalid or duplicate indices")
+        if len(train_idx) + len(valid_idx) != len(df):
+            raise LeakageError(f"fold {i} does not partition all rows")
         if len(train_idx) == 0 or len(valid_idx) == 0:
             raise LeakageError(f"fold {i} has an empty side")
         if len(np.intersect1d(train_idx, valid_idx)):
@@ -139,6 +147,8 @@ def make_holdout(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Secondary prompt-held-out split, untouched by model selection."""
     prompts = np.asarray(sorted(pd.unique(df["prompt_id"].astype(str))))
+    if n_groups < 1:
+        raise ValueError("holdout must contain at least one prompt")
     if n_groups >= len(prompts):
         raise ValueError("holdout would consume every prompt")
     rng = np.random.default_rng(seed)
@@ -155,6 +165,7 @@ def save_splits(
     folds: list[tuple[np.ndarray, np.ndarray]],
     method: str,
     seed: int,
+    shuffle: bool = True,
 ) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +176,7 @@ def save_splits(
         "n_splits": len(folds),
         "method": method,
         "seed": int(seed),
+        "shuffle": shuffle,
         "folds": [
             {
                 "fold": i,
@@ -203,4 +215,6 @@ def load_splits(
         )
         for f in payload["folds"]
     ]
+    if df is not None:
+        validate_splits(df, folds)
     return folds, payload

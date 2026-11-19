@@ -85,11 +85,35 @@ def load_weights(path: str | Path | None) -> dict[str, float] | None:
         raise FileNotFoundError(f"weights file not found: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
     weights = payload.get("weights", payload)
-    weights = {str(k): float(v) for k, v in weights.items() if float(v) > 0}
+    weights = {str(k): float(v) for k, v in weights.items()}
+    if any(not np.isfinite(v) or v < 0 for v in weights.values()):
+        raise ValueError(f"{path}: weights must be finite and nonnegative")
+    weights = {k: v for k, v in weights.items() if v > 0}
     if not weights:
         raise ValueError(f"{path}: no positive weights")
     return weights
 
+
+
+def validate_artifact_provenance(manifest: dict, train_df, model_configs: list[dict], seed: int) -> None:
+    if manifest.get("dataset_fingerprint") != dataset_fingerprint(train_df):
+        raise ModelError("final artifact dataset fingerprint differs; refit with --fit")
+    if manifest.get("seed") != seed or [m["config"] for m in manifest.get("models", [])] != model_configs:
+        raise ModelError("final artifact config or seed differs; refit with --fit")
+
+
+def validate_weight_provenance(path, manifest: dict, bundles: dict) -> dict[str, float]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    weights = load_weights(path)
+    missing = set(weights) - set(bundles)
+    if missing:
+        raise ValueError(f"weights reference unknown models: {sorted(missing)}")
+    if payload.get("dataset_fingerprint") != manifest.get("dataset_fingerprint"):
+        raise ValueError("weights and final models have different or missing dataset provenance")
+    configs = {entry["name"]: entry["config"] for entry in manifest["models"]}
+    if payload.get("model_configs") != {name: configs[name] for name in weights}:
+        raise ValueError("weights and final models have different or missing model configs")
+    return weights
 
 def blend_score_matrix(
     bundles: dict,

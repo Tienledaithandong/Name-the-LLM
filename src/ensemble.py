@@ -25,7 +25,10 @@ def load_oof(artifacts_dir: str | Path) -> dict[str, dict]:
     oof_dir = Path(artifacts_dir) / "oof"
     out: dict[str, dict] = {}
     for path in sorted(oof_dir.glob("*.npz")):
-        data = np.load(path, allow_pickle=True)
+        data = np.load(path, allow_pickle=False)
+        required = {"scores", "y", "labels", "row_ids", "fold_ids", "dataset_fingerprint", "config"}
+        if not required.issubset(data.files):
+            raise ValueError(f"{path.name}: legacy OOF lacks provenance; rerun CV")
         scores = np.asarray(data["scores"], dtype=np.float64)
         y = np.asarray(data["y"], dtype=np.int64)
         labels = [str(v) for v in data["labels"]]
@@ -33,23 +36,39 @@ def load_oof(artifacts_dir: str | Path) -> dict[str, dict]:
             raise ValueError(f"{path.name}: class order {labels} is not the official order")
         if scores.shape != (y.size, N_CLASSES):
             raise ValueError(f"{path.name}: unexpected score shape {scores.shape}")
-        out[path.stem] = {"scores": scores, "y": y}
+        if data["row_ids"].shape != y.shape or data["fold_ids"].shape != y.shape:
+            raise ValueError(f"{path.name}: OOF provenance must align with score rows")
+        if len(np.unique(data["row_ids"])) != y.size:
+            raise ValueError(f"{path.name}: duplicate OOF row ids")
+        out[path.stem] = {"scores": scores, "y": y, "row_ids": data["row_ids"],
+                          "fold_ids": data["fold_ids"],
+                          "dataset_fingerprint": str(data["dataset_fingerprint"]),
+                          "config": json.loads(str(data["config"]))}
     if not out:
         raise FileNotFoundError(
             f"no OOF files in {oof_dir}; run the training step first"
         )
+    first = next(iter(out.values()))
+    for name, item in out.items():
+        for key in ("row_ids", "fold_ids", "dataset_fingerprint", "y"):
+            if not np.array_equal(item[key], first[key]):
+                raise ValueError(f"{name}: OOF provenance mismatch: {key}")
     return out
 
 
 def normalize_scores(scores: np.ndarray) -> np.ndarray:
     """Row-wise z-scores, ignoring the -1e9 placeholder for absent fold classes."""
     scores = np.asarray(scores, dtype=np.float64).copy()
-    scores[scores < SENTINEL] = np.nan
+    missing = scores < SENTINEL
+    if not np.isfinite(scores).all() or np.any(missing.all(axis=1)):
+        raise ValueError("scores must be finite with at least one present class per row")
+    scores[missing] = np.nan
     mean = np.nanmean(scores, axis=1, keepdims=True)
     std = np.nanstd(scores, axis=1, keepdims=True)
     std[~np.isfinite(std) | (std < 1e-9)] = 1.0
     out = (scores - mean) / std
-    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    out[missing] = -1e9
+    return out
 
 
 def _score_with_weights(normalized: dict[str, np.ndarray], weights: dict[str, float]) -> np.ndarray:
@@ -149,10 +168,19 @@ def run_ensemble(
     artifacts_dir: str | Path,
     out_path: str | Path | None = None,
     max_models: int = 4,
+    min_gain: float = 0.0,
 ) -> dict:
     artifacts_dir = Path(artifacts_dir)
     oof = load_oof(artifacts_dir)
     result = greedy_blend(oof, max_models=max_models)
+    if result["gain_over_best_single"] < min_gain:
+        best = result["best_single"]
+        result["weights"] = {best["model"]: 1.0}
+        result["pooled_oof_balanced_accuracy"] = best["balanced_accuracy"]
+        result["gain_over_best_single"] = 0.0
+    result["min_gain"] = min_gain
+    result["dataset_fingerprint"] = next(iter(oof.values()))["dataset_fingerprint"]
+    result["model_configs"] = {name: oof[name]["config"] for name in result["weights"]}
     out = Path(out_path) if out_path else artifacts_dir / "ensemble" / "weights.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=1), encoding="utf-8")

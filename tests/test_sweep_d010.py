@@ -55,6 +55,8 @@ def test_sweep_reports_every_grid_cell_and_a_blend_delta():
         assert 0.0 <= cell["blend"] <= 1.0
         assert len(cell["blend_fold_scores"]) == len(folds)
         assert "single_view" in cell and 0.0 <= cell["single_view"] <= 1.0
+        ci = cell["bootstrap"]
+        assert ci["low"] <= ci["high"] and ci["n_prompts"] == 12
 
 
 def test_nuisance_k_zero_is_a_no_op_suppressor():

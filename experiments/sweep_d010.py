@@ -51,6 +51,8 @@ from src.repro import git_commit  # noqa: E402
 from src.train import append_registry  # noqa: E402
 from src.validation import load_splits  # noqa: E402
 
+from experiments.run_score_improvement import prompt_bootstrap  # noqa: E402
+
 SVD_WIDTHS = (64, 128, 256)
 NUISANCE_KS = (2, 4, 8, 16)
 MEMBERS = ("char_tfidf_logreg", "style_only")
@@ -136,9 +138,11 @@ def run_sweep(
     adopted_scores: np.ndarray,
     svd_widths=SVD_WIDTHS,
     nuisance_ks=NUISANCE_KS,
+    bootstrap_draws: int = 4000,
 ) -> dict:
     """Score every (svd, k) cell alone and as an equal-weighted third member."""
     cells: dict[str, dict] = {}
+    control_pred = np.asarray(adopted_scores).argmax(axis=1)
     for svd in svd_widths:
         for k in nuisance_ks:
             key = f"svd{int(svd)}_k{int(k)}"
@@ -154,6 +158,13 @@ def run_sweep(
                 "single_view_fold_scores": [
                     float(v) for v in _fold_scores(y, third, folds)
                 ],
+                "bootstrap": prompt_bootstrap(
+                    np.asarray(y),
+                    control_pred,
+                    np.asarray(blended).argmax(axis=1),
+                    np.asarray(groups).astype(str),
+                    draws=bootstrap_draws,
+                ),
             }
     return cells
 
@@ -186,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="artifacts/residual/d010_sweep.json")
     parser.add_argument("--registry", default=str(DEFAULT_REGISTRY))
     parser.add_argument("--no-registry", action="store_true")
+    parser.add_argument("--svd-widths", nargs="+", type=int, default=list(SVD_WIDTHS))
+    parser.add_argument("--ks", nargs="+", type=int, default=list(NUISANCE_KS))
+    parser.add_argument("--bootstrap-draws", type=int, default=4000)
     args = parser.parse_args(argv)
 
     frame = load_official_train(args.data_dir)
@@ -204,7 +218,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     started = time.perf_counter()
-    cells = run_sweep(texts, y, groups, folds, adopted)
+    cells = run_sweep(
+        texts,
+        y,
+        groups,
+        folds,
+        adopted,
+        svd_widths=tuple(args.svd_widths),
+        nuisance_ks=tuple(args.ks),
+        bootstrap_draws=args.bootstrap_draws,
+    )
     elapsed = round(time.perf_counter() - started, 2)
 
     result = {
@@ -274,11 +297,13 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     print(f"[d010] split {split_id} | adopted {adopted_ba:.4f} | {elapsed}s")
-    print(f"{'cell':14s} {'single':>7s} {'blend':>7s} {'delta':>8s}")
+    print(f"{'cell':14s} {'single':>7s} {'blend':>7s} {'delta':>8s}  paired 95% CI")
     for key, cell in cells.items():
+        ci = cell["bootstrap"]
         print(
             f"{key:14s} {cell['single_view']:7.4f} {cell['blend']:7.4f} "
-            f"{cell['blend'] - adopted_ba:+8.4f}"
+            f"{cell['blend'] - adopted_ba:+8.4f}  "
+            f"[{ci['low']:+.4f}, {ci['high']:+.4f}]"
         )
     best = max(cells, key=lambda k: cells[k]["blend"])
     print(f"[d010] best blend cell {best} at {cells[best]['blend']:.4f}; wrote {out}")

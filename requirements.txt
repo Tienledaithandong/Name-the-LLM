@@ -9,3 +9,9 @@ joblib>=1.3
 matplotlib>=3.8
 psutil>=5.9
 pytest>=8.0
+
+# Optional research extras - NOT needed by the submission or the default test suite:
+#   catboost>=1.2          configs/style_catboost.yaml (D049 ablation; 1.2.10 installed here).
+#                          Lazily imported in src/model.py; tests/test_model_catboost.py skips without it.
+#   sentence-transformers  configs/frozen_encoder.yaml (H3 benchmark, D013; 6.3.0 installed here).
+# lightgbm, xgboost and seaborn are not installed and not used by any config.

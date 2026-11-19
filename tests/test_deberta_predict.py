@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -56,17 +57,17 @@ def test_find_test_dir_requires_test_csv(tmp_path):
         find_test_dir(str(tmp_path))
 
 
-def test_load_label_order_falls_back_to_constants(tmp_path):
+def test_load_label_order_rejects_missing(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    order = load_label_order(model_dir)
-    assert order == list(LABELS)
+    with pytest.raises(SubmissionError, match="missing or invalid label order"):
+        load_label_order(model_dir)
 
 
 def test_load_label_order_uses_stored_order(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    stored = ["gpt-5.5", "gpt-6-astra", "gemini-3.7-flash"]
+    stored = list(LABELS)
     (model_dir / "label_order.json").write_text(
         json.dumps(stored), encoding="utf-8"
     )
@@ -77,7 +78,73 @@ def test_load_label_order_rejects_malformed(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "label_order.json").write_text("not-a-list", encoding="utf-8")
-    assert load_label_order(model_dir) == list(LABELS)
+    with pytest.raises(SubmissionError, match="missing or invalid label order"):
+        load_label_order(model_dir)
+
+
+def test_load_label_order_rejects_permutation(tmp_path):
+    stored = list(LABELS)
+    stored[0], stored[1] = stored[1], stored[0]
+    (tmp_path / "label_order.json").write_text(json.dumps(stored), encoding="utf-8")
+    with pytest.raises(SubmissionError, match="does not match"):
+        load_label_order(tmp_path)
+
+
+def test_inference_manifest_requires_training_configuration(tmp_path):
+    manifest = {"schema_version": "deberta-inference/v1", "class_order": list(LABELS),
+                "model_name": "local-model", "max_len": 384, "batch_size": 4}
+    p = tmp_path / "inference_manifest.json"
+    p.write_text(json.dumps(manifest), encoding="utf-8")
+    assert predict.load_inference_manifest(tmp_path)["max_len"] == 384
+    del manifest["max_len"]
+    p.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(SubmissionError, match="max_len"):
+        predict.load_inference_manifest(tmp_path)
+
+
+def test_blend_matches_evaluated_rowwise_formula():
+    class Bundle:
+        def __init__(self, scores):
+            self.scores = scores
+
+        def decision_function(self, texts):
+            return self.scores
+
+    deb = np.stack([np.arange(18), np.arange(18)[::-1]]).astype(float)
+    char = np.roll(deb, 2, axis=1)
+    style = np.roll(deb, 7, axis=1)
+    def z(x):
+        return (x - x.mean(axis=1, keepdims=True)) / x.std(axis=1, keepdims=True)
+    actual = predict.blend_candidate(deb, {"char_tfidf_logreg": Bundle(char),
+                                           "style_only": Bundle(style)}, ["a", "b"])
+    np.testing.assert_allclose(actual, .5 * z(deb) + .25 * z(char) + .25 * z(style))
+    with pytest.raises(SubmissionError, match="exactly"):
+        predict.blend_candidate(deb, {"style_only": Bundle(style)}, ["a", "b"])
+    char[0, 0] = np.nan
+    with pytest.raises(SubmissionError, match="invalid score"):
+        predict.blend_candidate(deb, {"char_tfidf_logreg": Bundle(char),
+                                      "style_only": Bundle(style)}, ["a", "b"])
+
+
+def test_sparse_loader_rejects_sklearn_version_mismatch(tmp_path):
+    manifest = {"class_order": list(LABELS), "environment": {"sklearn": "0.0.invalid"},
+                "models": [{"name": "char_tfidf_logreg"}, {"name": "style_only"}]}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(SubmissionError, match="require scikit-learn"):
+        predict.load_sparse_bundles(tmp_path)
+
+
+def test_main_rejects_sequence_length_drift_before_model_loading(tmp_path):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "label_order.json").write_text(json.dumps(list(LABELS)), encoding="utf-8")
+    (model_dir / "inference_manifest.json").write_text(json.dumps({
+        "schema_version": "deberta-inference/v1", "class_order": list(LABELS),
+        "model_name": "synthetic", "max_len": 384, "batch_size": 4,
+    }), encoding="utf-8")
+    (tmp_path / "test.csv").write_text("id,text\nsynthetic-id,synthetic text\n", encoding="utf-8")
+    with pytest.raises(SubmissionError, match="max-len override"):
+        main(["--model-dir", str(model_dir), "--test", str(tmp_path), "--max-len", "256"])
 
 
 def test_main_fails_fast_on_missing_model_dir(tmp_path, test_df, monkeypatch):

@@ -1,23 +1,13 @@
-"""Official-only vs official+pool training comparison (Phase 1b/1c).
+"""Official-only vs official+pool comparison using the non-transductive protocol (D028).
 
-For each model in a config, loads the official-only OOF produced by the harness
-(``artifacts/cv/official/oof/<name>.npz``) and re-fits the model with the audited
-clean Open Pool added to the TRAINING side of every grouped fold. Pool rows are
-decontaminated per fold against that fold's official holdout
-(``src.pool.decontaminate_fold``: exact dup, shared prompt, word TF-IDF cosine >
-threshold fit on the holdout only). Validation stays on official rows only, so
-the official+pool OOF is fold-aligned with the official-only OOF and the blend is
-directly comparable. Reports pooled balanced accuracy, per-class recall and
-within-provider errors, plus paired per-fold differences with a 95% Student-t CI.
-
-Leakage guards (D019): only pool ``text``/``model``/``prompt_canon`` are read — the
-upstream ``match_weight``/``style_score`` columns (fitted on ALL train prompts) are
-NEVER used. Every learned transform (TF-IDF/SVD/style scaler/classifier) is fit on
-the training side of each fold only. Pool rows never enter validation. No
-transductive step. This is a training experiment, not a submission.
-
-Run:
-    python experiments/pool_train.py --config configs/gbdt.yaml --models gbdt_style
+The pool is screened ONCE against the full official training set
+(``src.pool.decontaminate_global``) and the same clean rows are reused by every CV
+fold, so no fold's held-out text changes which pool rows enter training. This
+replaces the transductive per-fold route that D026 disabled. Pool rows are capped
+per fold only by class-proportional random subsampling (a compute budget), which is
+independent of validation text and labels. ``match_weight``/``style_score`` are
+never used as features (D019). Reported scores require provenance-backed baseline
+OOF (``--oof-dir`` must point at identity-verified OOF, e.g. cv_identity).
 """
 
 from __future__ import annotations
@@ -35,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_config
 from src.constants import ARTIFACTS_DIR, DEFAULT_REGISTRY, LABELS, N_CLASSES
-from src.data import indices_to_labels, labels_to_indices, load_competition_data
+from src.data import (indices_to_labels, labels_to_indices, load_competition_data,
+                      ordered_dataset_fingerprint)
 from src.metrics import (
     aggregate_folds,
     evaluate,
@@ -45,20 +36,13 @@ from src.metrics import (
     within_provider_confusions,
 )
 from src.model import estimator_from_config
-from src.pool import decontaminate_fold, load_pool
+from src.oof_identity import fold_assignments
+from src.pool import PoolError, decontaminate_global, load_pool
 from src.repro import git_commit
 from src.train import append_registry, describe
 from src.validation import load_splits
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def load_clean_pool(pool_path: str, clean_ids_path: str, *, strict: bool = False):
-    pool = load_pool(pool_path, strict=strict)
-    clean_ids = set(json.loads(Path(clean_ids_path).read_text(encoding="utf-8")))
-    keep = pool["id"].astype(str).isin(clean_ids).to_numpy()
-    pool = pool.loc[keep].reset_index(drop=True)
-    return pool
 
 
 def cap_pool_stratified(pool_df, cap: int, seed: int):
@@ -75,14 +59,72 @@ def cap_pool_stratified(pool_df, cap: int, seed: int):
     return pool_df.loc[np.sort(np.concatenate(parts))].reset_index(drop=True)
 
 
-def official_oof(oof_dir: Path, name: str):
-    data = np.load(oof_dir / f"{name}.npz", allow_pickle=True)
-    scores = np.asarray(data["scores"], dtype=np.float64)
-    y = np.asarray(data["y"], dtype=np.int64)
-    labels = [str(v) for v in data["labels"]]
+def cap_pool_balanced(pool_df, cap: int, seed: int):
+    """Subsample to <=cap rows with a uniform per-class target (D036 sibling guard).
+
+    The official train set is class-balanced (150 rows/class), but the Open Pool is
+    heavily skewed (e.g. gemini-3.7-flash has ~3.5k raw rows against siblings ~18-23k).
+    A proportional cap inherits that skew, so a pooled member sees far fewer rows for
+    thin classes than their siblings and mis-routes them (gemini-3.7-flash recall
+    -0.173). This caps every class to the same target ``cap // n_present_classes``
+    (or all rows when a class is thinner), matching the official uniform prior. The
+    row selection stays validation-independent: only class counts and the fixed seed
+    decide which rows enter training, never held-out text or labels.
+    """
+    if cap <= 0 or len(pool_df) <= cap:
+        return pool_df
+    rng = np.random.default_rng(seed)
+    labels = sorted(pool_df["model"].unique())
+    target = max(1, int(round(cap / len(labels))))
+    parts = []
+    for label in labels:
+        idx = pool_df.index[pool_df["model"] == label].to_numpy()
+        parts.append(rng.choice(idx, size=min(target, len(idx)), replace=False))
+    return pool_df.loc[np.sort(np.concatenate(parts))].reset_index(drop=True)
+
+
+CAP_MODES = {"proportional": cap_pool_stratified, "balanced": cap_pool_balanced}
+
+
+def official_oof(oof_dir: Path, name: str, train_df, folds):
+    """Load baseline OOF only when exact ordered data and folds are verified."""
+    with np.load(oof_dir / f"{name}.npz", allow_pickle=True) as data:
+        required = {"scores", "y", "labels", "ordered_dataset_sha256", "validation_fold_ids"}
+        missing = required - set(data.files)
+        if missing:
+            raise ValueError(f"{name}: OOF provenance missing {sorted(missing)}; rerun baseline")
+        scores = np.asarray(data["scores"], dtype=np.float64)
+        y = np.asarray(data["y"], dtype=np.int64)
+        labels = [str(v) for v in data["labels"]]
+        fingerprint = str(np.asarray(data["ordered_dataset_sha256"]).item())
+        assigned = np.asarray(data["validation_fold_ids"], dtype=np.int64)
     if labels != list(LABELS):
         raise ValueError(f"{name}: OOF class order is not the official order")
+    if fingerprint != ordered_dataset_fingerprint(train_df):
+        raise ValueError(f"{name}: OOF ordered dataset fingerprint does not match")
+    if not np.array_equal(assigned, fold_assignments(len(train_df), folds)):
+        raise ValueError(f"{name}: OOF validation folds do not match")
+    expected_y = labels_to_indices(train_df["model"].tolist())
+    if scores.shape != (len(train_df), N_CLASSES) or y.shape != expected_y.shape:
+        raise ValueError(f"{name}: OOF shape does not match dataset")
+    if not np.array_equal(y, expected_y) or not np.isfinite(scores).all():
+        raise ValueError(f"{name}: OOF labels or scores invalid")
     return scores, y
+
+
+def save_pool_oof(path: Path, scores: np.ndarray, y: np.ndarray, train_df, folds) -> None:
+    """Persist pool OOF with the same ordered-data and split identity as baseline."""
+    expected_y = labels_to_indices(train_df["model"].tolist())
+    scores = np.asarray(scores)
+    y = np.asarray(y)
+    if (scores.shape != (len(train_df), N_CLASSES) or not np.isfinite(scores).all()
+            or not np.array_equal(y, expected_y)):
+        raise ValueError("pool OOF scores or labels do not match the official data")
+    np.savez_compressed(
+        path, scores=scores, y=y, labels=np.asarray(LABELS, dtype=object),
+        ordered_dataset_sha256=np.asarray(ordered_dataset_fingerprint(train_df)),
+        validation_fold_ids=fold_assignments(len(train_df), folds),
+    )
 
 
 def fold_ba(scores: np.ndarray, y: np.ndarray, folds) -> list[float]:
@@ -94,23 +136,37 @@ def fold_ba(scores: np.ndarray, y: np.ndarray, folds) -> list[float]:
     return out
 
 
-def pool_cv(train_df, pool_df, folds, raw, seed, cos_threshold, pool_cap=0):
-    """Fit on official-train + decontaminated pool per fold; score official holdout."""
+def pool_cv(train_df, pool_df, folds, raw, seed, cos_threshold, pool_cap=0, cap_mode="proportional"):
+    """Fit on official-train + globally-decontaminated pool; score official holdout.
+
+    Non-transductive (D028): the pool is screened ONCE against the full official
+    training set and the same clean rows are reused by every fold, so no fold's
+    held-out text changes which pool rows enter training. Pool rows are capped per
+    fold only by ``cap_mode`` subsampling (a compute budget), which is independent of
+    validation text and labels.
+    """
+    cap_fn = CAP_MODES[cap_mode]
     texts = train_df["text"].tolist()
     groups = train_df["prompt_id"].astype(str).to_numpy()
     y_idx = labels_to_indices(train_df["model"].tolist())
     y_labels = indices_to_labels(y_idx)
+
+    keep, gstats = decontaminate_global(pool_df, train_df, cos_threshold=cos_threshold)
+    clean_pool = pool_df.loc[keep].reset_index(drop=True)
+    print(f"  [global decon] pool {gstats['n_pool']} -> clean {gstats['kept']} "
+          f"(exact {gstats['exact_dup']} + near {gstats['near_dup']} removed), fold-independent",
+          flush=True)
 
     scores = np.full((len(train_df), N_CLASSES), -1e9, dtype=np.float32)
     fold_metrics, decon = [], []
     fit_seconds = infer_seconds = 0.0
 
     for fold, (train_idx, valid_idx) in enumerate(folds):
-        holdout = train_df.iloc[valid_idx]
-        keep, stats = decontaminate_fold(pool_df, holdout, cos_threshold=cos_threshold)
-        pool_keep = cap_pool_stratified(pool_df.loc[keep], pool_cap, seed + fold)
-        stats["capped"] = int(len(pool_keep))
-        decon.append({"fold": fold, **stats})
+        if not set(groups[train_idx]).isdisjoint(set(groups[valid_idx])):
+            raise PoolError(f"fold {fold} contains a prompt on both sides")
+        pool_keep = cap_fn(clean_pool, pool_cap, seed + fold)
+        stats = {**gstats, "fold": fold, "capped": int(len(pool_keep)), "cap_mode": cap_mode}
+        decon.append(stats)
         pool_keep_texts = pool_keep["text"].tolist()
         pool_keep_y = labels_to_indices(pool_keep["model"].tolist())
         pool_keep_groups = pool_keep["prompt_canon"].astype(str).to_numpy()
@@ -132,9 +188,8 @@ def pool_cv(train_df, pool_df, folds, raw, seed, cos_threshold, pool_cap=0):
         pred = indices_to_labels(fold_scores.argmax(axis=1))
         fold_metrics.append(evaluate(y_labels[valid_idx], pred, model=f"{raw['name']}#fold{fold}"))
         print(
-            f"  [fold {fold}] pool kept {stats['kept']} -> capped {stats['capped']} "
-            f"(removed {stats['removed']}) | fit {fit_seconds:.1f}s | "
-            f"BA {fold_metrics[-1]['balanced_accuracy']:.4f}",
+            f"  [fold {fold}] clean pool -> capped {stats['capped']} | "
+            f"fit {fit_seconds:.1f}s | BA {fold_metrics[-1]['balanced_accuracy']:.4f}",
             flush=True,
         )
 
@@ -184,26 +239,34 @@ def main() -> None:
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--config", default="configs/gbdt.yaml")
     parser.add_argument("--pool", default="artifacts/pool_audit/ntl_open_pool.parquet")
-    parser.add_argument("--clean-ids", default="artifacts/pool_audit/clean_pool_ids.json")
-    parser.add_argument("--oof-dir", default="artifacts/cv/official/oof")
+    parser.add_argument("--clean-ids", default=None,
+                        help="unsupported: prefiltered IDs are recomputed globally instead")
+    parser.add_argument("--oof-dir", default="artifacts/cv_identity/official/oof")
     parser.add_argument("--splits", default="artifacts/splits/splits_official.json")
-    parser.add_argument("--out", default="artifacts/pool_cv/official")
+    parser.add_argument("--out", default="artifacts/pool_cv_global/official")
     parser.add_argument("--models", nargs="*", default=None, help="subset of model names")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cos-threshold", type=float, default=0.3)
     parser.add_argument("--pool-cap", type=int, default=0,
                         help="stratified cap on pool rows per fold (0=full); CPU budget guard")
+    parser.add_argument("--cap-mode", choices=sorted(CAP_MODES), default="proportional",
+                        help="proportional preserves pool class shares; balanced uses a "
+                             "uniform per-class target to guard thin classes (D036)")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--registry", default=str(DEFAULT_REGISTRY))
     parser.add_argument("--no-registry", action="store_true")
     args = parser.parse_args()
 
+    if args.clean_ids is not None:
+        raise SystemExit("--clean-ids is unsupported: the pool is decontaminated globally "
+                         "against the full official train set (D028), so prefiltered IDs are ignored")
+
     cfg = load_config(args.config)
     train_df, _ = load_competition_data(args.data_dir)
     folds, payload = load_splits(args.splits, train_df)
     split_id = f"{payload['method']}-s{payload['seed']}-n{payload['n_splits']}"
-    pool_df = load_clean_pool(args.pool, args.clean_ids, strict=args.strict)
-    print(f"official train {len(train_df)} rows | clean pool {len(pool_df)} rows | {split_id}",
+    pool_df = load_pool(args.pool, strict=args.strict)
+    print(f"official train {len(train_df)} rows | input pool {len(pool_df)} rows | {split_id}",
           flush=True)
 
     models = cfg["models"]
@@ -221,11 +284,10 @@ def main() -> None:
     for raw in models:
         name = str(raw["name"])
         print(f"\n=== {name} ({describe(raw)}) ===", flush=True)
-        off_scores, off_y = official_oof(oof_dir, name)
-        if not np.array_equal(off_y, labels_to_indices(train_df["model"].tolist())):
-            raise ValueError(f"{name}: official OOF rows are not aligned with train")
+        off_scores, off_y = official_oof(oof_dir, name, train_df, folds)
         pool_scores, fold_metrics, decon, fit_s, infer_s = pool_cv(
-            train_df, pool_df, folds, raw, args.seed, args.cos_threshold, args.pool_cap
+            train_df, pool_df, folds, raw, args.seed, args.cos_threshold, args.pool_cap,
+            args.cap_mode,
         )
         cmp = compare(name, off_scores, off_y, pool_scores, folds, train_df)
         cmp["decontamination"] = decon
@@ -233,10 +295,7 @@ def main() -> None:
         cmp["infer_seconds"] = round(infer_s, 2)
         results.append(cmp)
 
-        np.savez_compressed(
-            out_dir / "oof" / f"{name}.npz",
-            scores=pool_scores, y=off_y, labels=np.asarray(LABELS, dtype=object),
-        )
+        save_pool_oof(out_dir / "oof" / f"{name}.npz", pool_scores, off_y, train_df, folds)
         agg = aggregate_folds(fold_metrics)
         ci = cmp["paired_diff_ci"]
         print(
@@ -265,8 +324,8 @@ def main() -> None:
                 "external_data_id": "open-pool-v15",
                 "artifact_path": str(out_dir / "oof" / f"{name}.npz"),
                 "public_lb_score": "",
-                "notes": (f"official+pool (clean {len(pool_df)}, per-fold decon cos>{args.cos_threshold}, "
-                          f"cap/fold={args.pool_cap or 'full'}); "
+                "notes": (f"official+pool (clean {len(pool_df)}, GLOBAL non-transductive decon cos>{args.cos_threshold} "
+                          f"vs full official train, cap/fold={args.pool_cap or 'full'} mode={args.cap_mode}); "
                           f"vs official-only {cmp['official_only_ba']:.4f}; "
                           f"paired fold diff {ci['mean']:+.4f} [{ci['ci_low']:+.4f},{ci['ci_high']:+.4f}]"),
                 "status": "done",
@@ -282,7 +341,8 @@ def _write_report(path, results, n_pool, split_id, cos_threshold) -> None:
         "# Official-only vs official+pool training comparison",
         "",
         f"- split: **{split_id}** (grouped folds; validation on official rows only)",
-        f"- clean pool: **{n_pool}** rows (per-fold decontamination cos>{cos_threshold})",
+        f"- clean pool: **{n_pool}** rows (GLOBAL non-transductive decon cos>{cos_threshold} "
+        "vs the full official train set, reused identically by every fold)",
         "- pool added to the TRAINING side only; match_weight/style_score never used (D019)",
         "",
         "| model | official-only BA | +pool BA | delta | paired fold diff [95% CI] |",

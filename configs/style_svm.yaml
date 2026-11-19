@@ -1,0 +1,22 @@
+# Section 4 L139: the style-only SVM arm, which features.yaml never included.
+# Same 56 per-fold-standardised style features as style_only (logreg, 0.290398);
+# LinearSVC margins are NOT probabilities. Kept in its own config so the
+# expensive char_plus_style ablation (~20 min) is not re-run to add one variant.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+features:
+  max_features: 100000
+  min_df: 2
+  sublinear_tf: true
+
+models:
+  - name: style_svm
+    features: []
+    style: true
+    classifier: linearsvc
+    C: 1.0

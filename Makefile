@@ -2,7 +2,7 @@ PYTHON ?= python
 DATA ?= data
 CONFIG ?= configs/baseline.yaml
 
-.PHONY: help install test demo audit splits baseline features embeddings frozen-encoder ensemble figures stability stress predict package predict-crossed package-crossed clean
+.PHONY: help install test demo audit splits baseline features embeddings frozen-encoder ensemble evaluate figures stability stress predict package predict-crossed package-crossed clean
 
 help:
 	@echo "make install     install runtime dependencies"
@@ -14,10 +14,11 @@ help:
 	@echo "make features    cross-validate the stylometry ablations"
 	@echo "make embeddings  cross-validate dense/nuisance variants"
 	@echo "make frozen-encoder  H3 benchmark (needs optional sentence-transformers)"
-	@echo "make ensemble    greedy blend from saved OOF scores"
+	@echo "make ensemble    write exploratory candidate from identity-checked OOF"
+	@echo "make evaluate    score saved identity-verified OOF (no fitting, no test rows)"
 	@echo "make figures     render report figures from saved CV artifacts"
 	@echo "make stability   blend robustness: alternative seeds + secondary holdout"
-	@echo "make stress      primary full OOF + k-subsampled paired-difference stress test"
+	@echo "make stress      retired: transductive score reporting prohibited by D024"
 	@echo "make predict     refit on all data and write submission.parquet"
 	@echo "make package     build an upload-ready Kaggle dataset folder"
 	@echo "make predict-crossed   WITHDRAWN (D017/D018) research-only crossed inference"
@@ -55,15 +56,17 @@ frozen-encoder:
 ensemble:
 	$(PYTHON) -m src.cli ensemble --dataset official
 
+evaluate:
+	$(PYTHON) -m src.cli evaluate --dataset official --artifacts artifacts/cv_identity/official \
+		--members char_tfidf_logreg style_only --weights 0.5 0.5
+
 figures:
 	$(PYTHON) -m src.cli figures --dataset official
 
 stability:
 	$(PYTHON) -m src.cli stability --config configs/submission.yaml --data-dir $(DATA)
 
-# Primary full grouped OOF + inference-only k-subsampled stress test (paired
-# differences + 95% CIs). Add --reserve-fresh-holdout to persist the seed-2027
-# reserve without scoring it. Needs optional sentence-transformers for clustering.
+# Retired under D024: the command fails closed rather than reporting transductive scores.
 stress:
 	$(PYTHON) experiments/stress_k.py --data-dir $(DATA)
 

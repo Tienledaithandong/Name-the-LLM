@@ -1,0 +1,5 @@
+# Fixed CPU screen from the official-only score improvement plan, section 3.
+name: masked_character
+character_member: char_tfidf_logreg
+weight: 0.25
+length_bucket_maxima: [3, 6]

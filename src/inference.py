@@ -10,10 +10,8 @@ import numpy as np
 import pandas as pd
 
 from src.constants import LABELS, N_CLASSES, RANDOM_STATE
-from src.crossed import assign_one_per_model
 from src.data import dataset_fingerprint, labels_to_indices
 from src.ensemble import normalize_scores
-from src.grouping import cluster_embeddings
 from src.model import ModelError, estimator_from_config
 from src.repro import env_snapshot, git_commit
 
@@ -24,8 +22,22 @@ def fit_final(
     out_dir,
     seed=RANDOM_STATE,
     dataset_label="official",
+    pool_df=None,
+    pool_models=(),
+    cos_threshold=0.3,
+    pool_cap=12000,
 ):
-    """Refit every model on all labelled rows and write a loadable artifact dir."""
+    """Refit every model on all labelled rows and write a loadable artifact dir.
+
+    Members named in ``pool_models`` (D028) are additionally trained on the
+    globally-decontaminated external pool: the pool is screened **once** against the
+    complete official training set (the only reference, so eligibility never depends on
+    any holdout) and class-proportionally capped by ``pool_cap`` (a compute budget).
+    Other members train on official rows only. ``match_weight``/``style_score`` are
+    never used as features. The pool provenance and decontamination stats are recorded
+    in the manifest for audit; the inference blend is unchanged because it already
+    row-normalises each bundle (D035).
+    """
     out_dir = Path(out_dir)
     (out_dir / "models").mkdir(parents=True, exist_ok=True)
 
@@ -33,13 +45,44 @@ def fit_final(
     groups = train_df["prompt_id"].astype(str).to_numpy()
     y_idx = labels_to_indices(train_df["model"].tolist())
 
+    pool_models = set(pool_models or ())
+    pool_meta = None
+    fit_pool_texts = fit_pool_y = fit_pool_groups = None
+    if pool_models:
+        if pool_df is None or len(pool_df) == 0:
+            raise ValueError("pool_models given without a non-empty pool_df")
+        from src.pool import cap_pool_stratified, decontaminate_global
+
+        keep, gstats = decontaminate_global(pool_df, train_df, cos_threshold=cos_threshold)
+        clean = pool_df.loc[keep].reset_index(drop=True)
+        capped = cap_pool_stratified(clean, pool_cap, seed)
+        fit_pool_texts = capped["text"].tolist()
+        fit_pool_y = labels_to_indices(capped["model"].tolist())
+        fit_pool_groups = capped["prompt_canon"].astype(str).to_numpy()
+        pool_meta = {
+            "external_data_id": "open-pool-v15",
+            "pool_models": sorted(pool_models),
+            "cos_threshold": float(cos_threshold),
+            "pool_cap": int(pool_cap),
+            "decontamination": gstats,
+            "capped_rows": int(len(capped)),
+            "reference": "full_official_train",
+        }
+
     fitted = []
     for raw in model_configs:
         name = str(raw["name"])
         estimator = estimator_from_config(raw, seed=seed)
-        estimator.fit(texts, y_idx, groups=groups)
+        if name in pool_models:
+            estimator.fit(texts + fit_pool_texts, np.concatenate([y_idx, fit_pool_y]),
+                          groups=np.concatenate([groups, fit_pool_groups]))
+            fit_mode = f"train+global_pool(capped={len(fit_pool_texts)})"
+        else:
+            estimator.fit(texts, y_idx, groups=groups)
+            fit_mode = "train_only"
         estimator.save(out_dir / "models" / f"{name}.joblib")
-        fitted.append({"name": name, "config": raw, "path": f"models/{name}.joblib"})
+        fitted.append({"name": name, "config": raw, "path": f"models/{name}.joblib",
+                       "fit_mode": fit_mode})
 
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -51,6 +94,7 @@ def fit_final(
         "class_order": list(LABELS),
         "n_classes": N_CLASSES,
         "models": fitted,
+        "pool": pool_meta,
         "environment": env_snapshot(),
     }
     path = out_dir / "manifest.json"
@@ -84,8 +128,15 @@ def load_weights(path):
     if not path.is_file():
         raise FileNotFoundError(f"weights file not found: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: weights document must be a mapping")
     weights = payload.get("weights", payload)
-    weights = {str(k): float(v) for k, v in weights.items() if float(v) > 0}
+    if not isinstance(weights, dict):
+        raise ValueError(f"{path}: weights must be a mapping")
+    weights = {str(k): float(v) for k, v in weights.items()}
+    if any(not np.isfinite(v) or v < 0 for v in weights.values()):
+        raise ValueError(f"{path}: weights must be finite and nonnegative")
+    weights = {k: v for k, v in weights.items() if v > 0}
     if not weights:
         raise ValueError(f"{path}: no positive weights")
     return weights
@@ -95,7 +146,11 @@ def blend_score_matrix(bundles, texts, weights=None):
     """Row-normalised blend margins (n_rows x N_CLASSES); not probabilities."""
     if not bundles:
         raise ValueError("no fitted models")
-    if weights:
+    if weights is not None:
+        if not isinstance(weights, dict) or not weights or any(not np.isfinite(float(w)) or float(w) < 0 for w in weights.values()):
+            raise ValueError("weights must be a nonempty mapping of finite nonnegative values")
+        if not any(float(w) > 0 for w in weights.values()):
+            raise ValueError("at least one model weight must be positive")
         missing = set(weights) - set(bundles)
         if missing:
             raise ValueError(f"weights reference unknown models: {sorted(missing)}")
@@ -129,63 +184,8 @@ def predict_dataframe_crossed(
     n_clusters=None,
     models_per_prompt=18,
 ):
-    """Crossed-design prediction: cluster passages into prompt groups, then
-    enforce one-passage-per-model assignment within each recovered group.
-
-    Label-free and transductive (uses only test text). encoder embeds the
-    passages for clustering; provide exactly one of n_clusters or
-    distance_threshold (default cosine 0.4).  When neither is given, the
-    group count is estimated as n_rows / models_per_prompt.
-    """
-    if encoder is None:
-        raise ValueError("crossed prediction requires an encoder for grouping")
-
-    texts = test_df["text"].astype(str).tolist()
-    embeddings = encoder.encode(texts)
-
-    if n_clusters is not None:
-        cluster_labels = cluster_embeddings(embeddings, n_clusters=n_clusters)
-    elif distance_threshold is not None:
-        cluster_labels = cluster_embeddings(embeddings, distance_threshold=distance_threshold)
-    else:
-        n_rows = len(test_df)
-        n_clusters = max(1, n_rows // models_per_prompt)
-        cluster_labels = cluster_embeddings(embeddings, n_clusters=n_clusters)
-
-    model_names = list(bundles.keys())
-    n_models = len(model_names)
-
-    predictions = np.full(len(test_df), None, dtype=object)
-
-    for group_id in np.unique(cluster_labels):
-        group_indices = np.where(cluster_labels == group_id)[0]
-        group_texts = [texts[j] for j in group_indices]
-        gscores = blend_score_matrix(bundles, group_texts)
-        if len(group_indices) <= n_models:
-            choice = assign_one_per_model(gscores, group_indices)
-        else:
-            choice = np.empty(len(group_indices), dtype=int)
-            ranked = np.argsort(-gscores.max(axis=1))
-            used_models = []
-            pos = 0
-            for rank in ranked:
-                if pos < n_models:
-                    ordered = np.argsort(-gscores[rank])
-                    chosen = next(m for m in ordered if m not in used_models)
-                    choice[rank] = chosen
-                    used_models.append(chosen)
-                    pos += 1
-                else:
-                    choice[rank] = gscores[rank].argmax()
-        for k, idx in enumerate(group_indices):
-            predictions[idx] = LABELS[choice[k]]
-
-    if np.any(predictions is None):
-        raise ValueError(
-            "Some predictions are missing; check clustering and assignment logic"
-        )
-
-    return predictions
+    """Reject the withdrawn transductive inference path (D024)."""
+    raise ValueError("crossed inference is withdrawn under D024")
 
 
 def predict_file(out_dir, test_df, weights_path=None):

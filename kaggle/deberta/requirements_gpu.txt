@@ -21,5 +21,6 @@ psutil>=5.9
 sentencepiece>=0.2
 safetensors>=0.10
 torch>=2.3
-transformers>=4.45
+# ModernBERT (H8) needs >=4.48; DeBERTa-v3 alone works from 4.45.
+transformers>=4.48
 accelerate>=0.29

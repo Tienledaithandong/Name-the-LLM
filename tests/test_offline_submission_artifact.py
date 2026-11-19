@@ -85,6 +85,11 @@ def tiny_model_dir(tmp_path_factory):
     (model_dir / "label_order.json").write_text(
         json.dumps(list(LABELS)), encoding="utf-8"
     )
+    (model_dir / "inference_manifest.json").write_text(
+        json.dumps({"schema_version": "deberta-inference/v1", "class_order": list(LABELS),
+                    "model_name": "synthetic-tiny-bert", "max_len": 128, "batch_size": 16}),
+        encoding="utf-8",
+    )
     return model_dir
 
 
@@ -228,3 +233,32 @@ def test_missing_test_csv_fails_fast(tmp_path, tiny_model_dir):
     )
     assert proc.returncode != 0
     assert "SubmissionError" in proc.stderr or "test.csv not found" in proc.stderr
+
+
+def test_offline_blend_loads_both_synthetic_sparse_bundles(
+    tmp_path, tiny_model_dir, synthetic_data
+):
+    """The candidate must actually load and combine both offline model families."""
+    from src.inference import fit_final
+
+    train, test, _ = synthetic_data
+    train = train.groupby("model", group_keys=False).head(2)
+    sparse_dir = tmp_path / "sparse"
+    fit_final([
+        {"name": "char_tfidf_logreg", "features": ["char"],
+         "classifier": "logreg", "C": 2.0, "max_features": 100000},
+        {"name": "style_only", "features": [], "style": True, "classifier": "logreg", "C": 1.0},
+    ], train, sparse_dir, dataset_label="synthetic")
+    test_file = tmp_path / "test.csv"
+    test.iloc[:3].to_csv(test_file, index=False)
+    out = tmp_path / "submission.parquet"
+    env = {**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONPATH": str(ROOT)}
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "kaggle" / "deberta" / "predict.py"),
+         "--model-dir", str(tiny_model_dir), "--test", str(test_file),
+         "--mode", "blend", "--sparse-dir", str(sparse_dir), "--out", str(out)],
+        cwd=str(ROOT), env=env, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    frame = validate_submission(out, expected_ids=test.iloc[:3]["id"])
+    assert len(frame) == 3 and frame["model"].isin(LABELS).all()

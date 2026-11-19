@@ -1,0 +1,22 @@
+# Plan §4 L139: the CatBoost arm of the style-only classifier comparison.
+# Same registered folds as baseline.yaml / style_svm.yaml so the three families
+# (logreg 0.290398, linearsvc 0.284449, catboost here) are directly comparable.
+# Kept separate from configs/gbdt.yaml so the two SVD GBDT variants are not re-run.
+# catboost is an OPTIONAL dependency; src.model imports it lazily.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+models:
+  - name: style_catboost
+    features: []
+    style: true
+    classifier: catboost
+    class_weight: balanced
+    iterations: 300
+    depth: 6
+    learning_rate: 0.1
+    l2_leaf_reg: 3.0

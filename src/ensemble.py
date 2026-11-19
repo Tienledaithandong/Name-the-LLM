@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -17,29 +18,58 @@ def load_weights(path: str | Path | None) -> dict[str, float] | None:
     if path is None:
         return None
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("weights document must be a mapping")
     weight = payload.get("weights", payload)
-    weight = {k: float(v) for k, v in weight.items() if float(v) > 0}
+    if not isinstance(weight, dict):
+        raise ValueError("weights must be a mapping")
+    weight = {str(k): float(v) for k, v in weight.items()}
+    if any(not np.isfinite(v) or v < 0 for v in weight.values()):
+        raise ValueError("weights must be finite and nonnegative")
+    weight = {k: v for k, v in weight.items() if v > 0}
     return weight if weight else None
 
 
-def load_oof(artifacts_dir: str | Path) -> dict[str, dict]:
-    """Load every saved OOF score matrix under ``<artifacts>/oof``."""
+def load_oof(artifacts_dir: str | Path, members: list[str] | None = None) -> dict[str, dict]:
+    """Load OOF matrices, optionally restricting to explicitly named members."""
     oof_dir = Path(artifacts_dir) / "oof"
     out: dict[str, dict] = {}
+    if members is not None and (not members or len(set(members)) != len(members)):
+        raise ValueError("ensemble members must be a nonempty list without duplicates")
     for path in sorted(oof_dir.glob("*.npz")):
-        data = np.load(path, allow_pickle=True)
-        scores = np.asarray(data["scores"], dtype=np.float64)
-        y = np.asarray(data["y"], dtype=np.int64)
-        labels = [str(v) for v in data["labels"]]
+        if members is not None and path.stem not in members:
+            continue
+        with np.load(path, allow_pickle=True) as data:
+            required = {"scores", "y", "labels", "ordered_dataset_sha256", "validation_fold_ids"}
+            if required - set(data.files):
+                raise ValueError(f"{path.name}: OOF identity metadata missing; rerun training")
+            scores = np.asarray(data["scores"], dtype=np.float64)
+            y = np.asarray(data["y"], dtype=np.int64)
+            labels = [str(v) for v in data["labels"]]
+            fingerprint = str(np.asarray(data["ordered_dataset_sha256"]).item())
+            folds = np.asarray(data["validation_fold_ids"], dtype=np.int64)
         if labels != list(LABELS):
             raise ValueError(f"{path.name}: class order {labels} is not the official order")
-        if scores.shape != (y.size, N_CLASSES):
+        if y.ndim != 1 or scores.shape != (y.size, N_CLASSES) or folds.shape != y.shape:
             raise ValueError(f"{path.name}: unexpected score shape {scores.shape}")
-        out[path.stem] = {"scores": scores, "y": y}
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or not np.isfinite(scores).all() or (folds < 0).any():
+            raise ValueError(f"{path.name}: invalid OOF fingerprint, scores or fold assignments")
+        out[path.stem] = {"scores": scores, "y": y,
+                          "ordered_dataset_sha256": fingerprint, "validation_fold_ids": folds}
     if not out:
         raise FileNotFoundError(
             f"no OOF files in {oof_dir}; run the training step first"
         )
+    if members is not None and set(out) != set(members):
+        raise FileNotFoundError(f"missing OOF members: {sorted(set(members) - set(out))}")
+    names = sorted(out)
+    reference = out[names[0]]
+    for name in names[1:]:
+        item = out[name]
+        if (item["ordered_dataset_sha256"] != reference["ordered_dataset_sha256"] or
+                not np.array_equal(item["validation_fold_ids"], reference["validation_fold_ids"]) or
+                not np.array_equal(item["y"], reference["y"])):
+            raise ValueError(f"{name}: OOF rows or folds are not aligned with {names[0]}")
     return out
 
 
@@ -90,9 +120,15 @@ def greedy_blend(
     if not names:
         raise ValueError("no models")
     y = oof[names[0]]["y"]
+    reference_hash = oof[names[0]].get("ordered_dataset_sha256")
+    reference_folds = oof[names[0]].get("validation_fold_ids")
+    if not isinstance(reference_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", reference_hash) or reference_folds is None:
+        raise ValueError("OOF identity metadata missing; rerun training")
     for name in names:
-        if not np.array_equal(oof[name]["y"], y):
-            raise ValueError(f"{name}: OOF rows are not fold-aligned with {names[0]}")
+        if (not np.array_equal(oof[name]["y"], y) or
+                oof[name].get("ordered_dataset_sha256") != reference_hash or
+                not np.array_equal(oof[name].get("validation_fold_ids"), reference_folds)):
+            raise ValueError(f"{name}: OOF rows or folds are not aligned with {names[0]}")
     normalized = {name: normalize_scores(oof[name]["scores"]) for name in names}
 
     singles = {name: balanced_accuracy(*_labels(y, normalized[name])) for name in names}
@@ -150,9 +186,10 @@ def run_ensemble(
     artifacts_dir: str | Path,
     out_path: str | Path | None = None,
     max_models: int = 4,
+    members: list[str] | None = None,
 ) -> dict:
     artifacts_dir = Path(artifacts_dir)
-    oof = load_oof(artifacts_dir)
+    oof = load_oof(artifacts_dir, members=members)
     result = greedy_blend(oof, max_models=max_models)
     out = Path(out_path) if out_path else artifacts_dir / "ensemble" / "weights.json"
     out.parent.mkdir(parents=True, exist_ok=True)

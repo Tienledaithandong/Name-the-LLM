@@ -8,12 +8,12 @@ Frozen before the first scored experiment. Any change here is an ADR in
 - **Primary:** `StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)`
   on `prompt_id` groups, falling back to `GroupKFold(5)` when a class has fewer
   than five prompt groups (`src/validation.make_splits`, method `auto`).
-- **Secondary (robustness):** prompt-held-out split with a different seed
-  (`make_holdout`). Used only for a final check, never for selection. The seed-7
-  holdout has been **examined** repeatedly (D015–D017) and is no longer
-  "untouched"; a **fresh** holdout (seed 2027, 25 prompts / 450 rows) is reserved
-  for final selection and is not scored until then
-  (`experiments/stress_k.py --reserve-fresh-holdout`).
+- **Secondary (robustness):** prompt-held-out splits such as seed 7 and the
+  previously reserved seed 2027 are descriptive checks, not independent final
+  evaluation: their prompts participated in earlier full-OOF development.
+  Use a genuinely new labelled prompt set or a pre-specified nested grouped
+  evaluation, with every selection decision made inside each outer training fold,
+  for a stronger estimate (D024).
 - **Repeatability:** seed checks with 2–3 alternative seeds are reported as a
   stability check, not used to pick the winner. Implemented by
   `src/stability.py` (`python -m src.cli stability`, `make stability`), which
@@ -40,9 +40,35 @@ For each fold, and only on the training side, we fit:
 4. the nuisance-suppression projection (training prompts only),
 5. the classifier and its class weights.
 
-The validation side is only ever transformed. No transductive step is used for
-any reported score. `tests/test_features.py` asserts that a token present only
-in validation text is absent from the fitted vocabulary.
+The validation side is only ever transformed. External-pool decontamination
+must not fit a vocabulary, IDF or other learned transform on held-out passages.
+Shared-prompt screening requires a provenance-backed mapping between namespaces;
+zero matches between unrelated identifiers are not evidence of disjoint prompts.
+
+**Pool screening (D026 ban, D028/D037 route).** *Per-fold* screening — selecting
+training rows by their similarity or exact match to the held-out texts of that
+fold — is transductive and stays **banned**. `experiments/pool_train.py` is
+global-only by construction (it exposes no per-fold option) and its `--clean-ids`
+input fails closed, recomputing the screen globally instead. The GPU kernel keeps
+`--pool-scope fold` only as a disabled diagnostic and aborts when it is selected
+(`kaggle/deberta/deberta_train.py`). Audit clean-ID lists that depend on
+validation examples are diagnostic only (D026). The adopted route is
+`src.pool.decontaminate_global`: screen the pool **once** against the *complete*
+official train (exact text + word-TF-IDF cosine > 0.3, vectorizer fit on that same
+train), then reuse one fold-independent keep-mask in every fold
+(226,191 -> 226,049 clean; 0 exact, 142 near). No held-out passage selects a
+training row, so this is not transductive. `cap_pool_stratified` then applies a
+validation-independent compute budget (40,000/fold -> 40,001 rows after
+per-class rounding). Residual risk: a differently-worded answer to an official
+*validation* prompt cannot be excluded without a reviewed prompt crosswalk, which
+does not exist (D024); the mitigations are fold-independence, training-only use,
+prompt-grouped official folds, and the alternative-seed + nested outer gates.
+See `docs/external_data_register.md`.
+
+No transductive step is used for any reported score. `tests/test_features.py`
+asserts that a token present only in validation text is absent from the fitted
+vocabulary; `tests/test_pool.py` and `tests/test_deberta_pool_guards.py` cover the
+global screen and the fail-closed per-fold path.
 
 ## 3. Metric and reporting
 
@@ -60,35 +86,22 @@ in validation text is absent from the fitted vocabulary.
 - Public leaderboard scores are recorded separately in the registry and are
   never used as a selection signal.
 
-### 3.1 k-subsampled stress test (batch-dependent methods only)
+### 3.1 Historical batch-dependent stress tests
 
-The hidden test is believed to have ~1–3 passages per prompt (k≈2), not the train
-set's k=18 (D017). Transductive post-processing (recovered-group Hungarian,
-damped Sinkhorn) can exploit batch structure the test does not have. We therefore
-keep the full grouped OOF as the primary metric and add a **stress test**, not a
-second selection score:
-
-- Subsample the pooled OOF to k = 1, 2, 3, 18 passages per prompt, repeated over
-  ≥10 subsample seeds (`experiments/stress_k.py`).
-- Report **paired differences** (method − argmax) on the *same* subsampled rows:
-  mean ± sample std and a 95% Student-t CI across seeds (`metrics.paired_difference`,
-  `metrics.mean_ci`). Report the argmax BA ± std too. Never report only the best
-  sampled score.
-- Settings are **fixed and pre-registered** (e.g. Sinkhorn strength 0.3 / 0.6,
-  target_mix 0.35); we do **not** pick a best-of grid on the stress test — that
-  would be tuning on it.
-- This is **inference-only**. Transductive methods are never part of the primary
-  reported CV score (hard rule: no transductive steps in reported scores). A
-  batch method is adopted only if its paired-difference CI excludes 0 at test-like
-  k on both the CV and the (examined) holdout, and then only on top of a strong
-  ensemble (Phase 4).
+Hidden-test prompt multiplicity is not verified. The older k-subsampled
+Hungarian and Sinkhorn scores were exploratory transductive diagnostics and do
+not satisfy the hard rule against transductive steps in reported scores. The
+historical CLI is retired; do not generate or report new such scores under this
+protocol (D024). Full grouped OOF remains the primary independent-passage metric.
 
 ### 3.2 Holdout reserve
 
-The seed-7 holdout is **examined** (used in D015–D017) and may be optimistic.
-Before final selection we either score the **fresh reserved** seed-2027 holdout
-once, or use nested grouped evaluation. The fresh holdout is persisted but not
-scored until then; examining it early burns the reserve.
+The seed-7 holdout is examined. The seed-2027 subset was not separately scored
+when reserved, but its prompts appeared in previous full OOF experiments and
+influenced earlier development; it is not an untouched end-to-end test. Report
+it as a descriptive check. Before final selection, use genuinely new labelled
+prompts or pre-specified nested grouped CV. Model, pool, hyperparameter and blend
+selection must occur inside each outer training partition (D024).
 
 ## 4. Baselines and ablation order
 
@@ -119,6 +132,18 @@ All must hold; otherwise the result is logged as a negative result.
 
 A blend must beat the best single model on pooled OOF by at least the configured
 `min_gain` before it is used for a submission.
+
+The boxes above are a per-experiment template, not a progress list. The adopted
+cap-40k pool-MIX candidate satisfies all seven: same registered split and
+fingerprint (`artifacts/pool_cv_cap40k/official/results.json`,
+`validation_independent: true`), global screen instead of per-fold selection
+(D028), pooled gain positive in **all five folds** and reproduced on seed 13 and
+a nested outer gate (D037/D039, `artifacts/nested_pool_blend_cap40k/`,
+`artifacts/mix_baseline_verify_cap40k*/`), per-class recall and within-provider
+confusions inspected (including the recorded `gemini-3.7-flash` -0.207 and
+`kimi-k3` -0.093 recall harm), cold-start runtime/RSS measured on 4,000 rows
+(D043, 13.77 s / 0.370 GB), all identifiers in `experiments/registry.csv`, and the
+rationale written up in D028/D037.
 
 ## 6. Registry columns
 

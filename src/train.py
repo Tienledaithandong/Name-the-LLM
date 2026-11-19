@@ -18,10 +18,11 @@ import numpy as np
 import pandas as pd
 
 from src.constants import DEFAULT_REGISTRY, LABELS, N_CLASSES, RANDOM_STATE
-from src.data import indices_to_labels, labels_to_indices
+from src.data import indices_to_labels, labels_to_indices, ordered_dataset_fingerprint
 from src.metrics import aggregate_folds, evaluate
 from src.model import estimator_from_config
-from src.repro import env_snapshot, git_commit
+from src.oof_identity import fold_assignments
+from src.repro import env_snapshot, git_commit, git_worktree_status
 
 REGISTRY_COLUMNS = [
     "experiment_id",
@@ -91,6 +92,8 @@ def run_cv(
     groups = train_df["prompt_id"].astype(str).to_numpy()
     y_idx = labels_to_indices(train_df["model"].tolist())
     y_labels = indices_to_labels(y_idx)
+    ordered_fingerprint = ordered_dataset_fingerprint(train_df)
+    validation_folds = fold_assignments(len(train_df), folds)
 
     results: list[dict] = []
     for raw in model_configs:
@@ -136,6 +139,8 @@ def run_cv(
             scores=scores,
             y=y_idx,
             labels=np.asarray(LABELS, dtype=object),
+            ordered_dataset_sha256=np.asarray(ordered_fingerprint),
+            validation_fold_ids=validation_folds,
         )
         payload = {
             "model": name,
@@ -152,6 +157,7 @@ def run_cv(
             "peak_ram_gb": round(peak_ram, 3),
             "environment": env_snapshot(),
             "git_commit": git_commit(Path(__file__).resolve().parents[1]),
+            "git_worktree_status": git_worktree_status(Path(__file__).resolve().parents[1]),
         }
         metrics_path = out_dir / "metrics" / f"{name}.json"
         metrics_path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -198,9 +204,11 @@ def run_cv(
                     or ("synthetic-fixture" if dataset_label == "synthetic" else "none"),
                     "artifact_path": str(oof_path),
                     "public_lb_score": "",
-                    "notes": "synthetic smoke run - not a competition result"
-                    if dataset_label == "synthetic"
-                    else "",
+                    "notes": "; ".join(filter(None, [
+                        "synthetic smoke run - not a competition result" if dataset_label == "synthetic" else "",
+                        f"worktree {payload['git_worktree_status']} at recording"
+                        if payload["git_worktree_status"] != "clean" else "",
+                    ])),
                     "status": "done",
                 },
             )

@@ -35,15 +35,26 @@ from src.constants import (
 )
 from src.data import (
     dataset_fingerprint,
+    indices_to_labels,
     labels_to_indices,
     load_competition_data,
+    ordered_dataset_fingerprint,
     validate_test_frame,
     validate_train_frame,
 )
-from src.ensemble import run_ensemble
+from src.ensemble import load_oof, normalize_scores, run_ensemble
 from src.inference import fit_final, load_final, predict_dataframe
-from src.metrics import evaluate
-from src.repro import env_snapshot
+from src.metrics import (
+    aggregate_folds,
+    confusion_matrix,
+    evaluate,
+    length_band_metrics,
+    mean_ci,
+    paired_difference,
+    within_provider_confusions,
+)
+from src.oof_identity import fold_assignments
+from src.repro import env_snapshot, git_commit
 from src.submission import build_submission, validate_submission
 from src.train import run_cv
 from src.validation import (
@@ -160,11 +171,22 @@ def cmd_ensemble(args) -> int:
     cfg = load_config(args.config)
     artifacts = Path(args.artifacts) if args.artifacts else ARTIFACTS_DIR / "cv" / args.dataset
     max_models = int(cfg.get("ensemble", {}).get("max_models", 4))
+    members = cfg.get("ensemble", {}).get("members")
+    if not isinstance(members, list) or not members or any(not isinstance(x, str) or not x for x in members):
+        raise ValueError("ensemble config must explicitly list the candidate members")
+    min_gain = float(cfg.get("ensemble", {}).get("min_gain", 0.0))
+    if not np.isfinite(min_gain) or min_gain < 0:
+        raise ValueError("ensemble min_gain must be a finite nonnegative number")
+    candidate_path = Path(args.out) if args.out else artifacts / "ensemble" / "candidate_weights.json"
     result = run_ensemble(
         artifacts,
-        out_path=args.out or artifacts / "ensemble" / "weights.json",
+        out_path=candidate_path,
         max_models=max_models,
+        members=members,
     )
+    result["min_gain"] = min_gain
+    result["meets_min_gain_on_selection_oof"] = result["gain_over_best_single"] >= min_gain
+    candidate_path.write_text(json.dumps(result, indent=1), encoding="utf-8")
     print("[ensemble] weights:", json.dumps(result["weights"], indent=1))
     print(
         f"[ensemble] pooled OOF {result['pooled_oof_balanced_accuracy']:.4f} "
@@ -172,12 +194,133 @@ def cmd_ensemble(args) -> int:
         f"({result['best_single']['model']}), gain "
         f"{result['gain_over_best_single']:+.4f}"
     )
-    if result["gain_over_best_single"] <= 0:
-        print("[ensemble] no validated gain; prefer the single best model for submission.")
+    print(f"[ensemble] exploratory candidate saved to {candidate_path}; independent confirmation is required.")
+    if not result["meets_min_gain_on_selection_oof"]:
+        print(f"[ensemble] selection OOF gain does not meet min_gain={min_gain:.4f}.")
+    return 0
+
+
+# D041 bands: the official corpus spans 36-274 words, so the top band stays open-ended.
+LENGTH_BAND_EDGES = (0, 50, 100, 150, 200)
+
+
+def _variant_metrics(truth, pred, folds, name: str, words=None) -> dict:
+    entry = evaluate(truth, pred, model=name)
+    entry["within_provider"] = within_provider_confusions(truth, pred)
+    entry["confusion_matrix"] = np.asarray(confusion_matrix(truth, pred)).tolist()
+    entry["folds"] = aggregate_folds(
+        evaluate(truth[folds == k], pred[folds == k], model=name) for k in np.unique(folds)
+    )
+    entry["fold_ci"] = mean_ci(entry["folds"]["fold_scores"])
+    if words is not None:
+        entry["length_bands"] = length_band_metrics(truth, pred, words, edges=LENGTH_BAND_EDGES)
+    return entry
+
+
+def cmd_evaluate(args) -> int:
+    """Score saved identity-verified OOF; fits nothing and scores no test row."""
+    artifacts = Path(args.artifacts) if args.artifacts else ARTIFACTS_DIR / "cv" / args.dataset
+    members = list(args.members)
+    oof = load_oof(artifacts, members)
+    splits = json.loads(_split_path(args.dataset, args.splits).read_text(encoding="utf-8"))
+    fingerprint = splits.get("ordered_dataset_sha256")
+    reference = oof[members[0]]
+    n_rows = int(reference["y"].size)
+    folds_full = [
+        (np.asarray(f["train"], dtype=int), np.asarray(f["valid"], dtype=int))
+        for f in splits["folds"]
+    ]
+    expected_folds = fold_assignments(n_rows, folds_full)
+    for name in members:
+        item = oof[name]
+        if item["ordered_dataset_sha256"] != fingerprint:
+            raise ValueError(f"{name}: OOF fingerprint differs from the frozen splits")
+        if not np.array_equal(item["validation_fold_ids"], expected_folds):
+            raise ValueError(f"{name}: OOF fold assignments differ from the frozen splits")
+
+    truth = indices_to_labels(reference["y"])
+    folds = reference["validation_fold_ids"]
+    words = None
+    if args.length_bands:
+        train, _test = load_competition_data(args.data_dir)
+        if ordered_dataset_fingerprint(train) != fingerprint:
+            raise ValueError("the local train frame does not match the split fingerprint")
+        if len(train) != n_rows:
+            raise ValueError(f"OOF has {n_rows} rows but train has {len(train)}")
+        words = train["text"].astype(str).str.split().str.len().to_numpy(dtype=np.int64)
+
+    results = {}
+    for name in members:
+        pred = indices_to_labels(oof[name]["scores"].argmax(axis=1))
+        results[name] = _variant_metrics(truth, pred, folds, name, words)
+
+    if args.weights:
+        weights = [float(w) for w in args.weights]
+        if len(weights) != len(members):
+            raise ValueError("--weights must match --members one-to-one")
+        if any(not np.isfinite(w) or w < 0 for w in weights) or not any(w > 0 for w in weights):
+            raise ValueError("--weights must be finite, nonnegative and not all zero")
+        matrix = sum(
+            normalize_scores(oof[name]["scores"]) * w for name, w in zip(members, weights)
+        )
+        pred = indices_to_labels(matrix.argmax(axis=1))
+        blend = _variant_metrics(truth, pred, folds, "blend", words)
+        blend["weights"] = dict(zip(members, weights))
+        blend["blend_rule"] = "row_z_mean (src.ensemble.normalize_scores); margins are not probabilities"
+        blend["paired_vs_members"] = {
+            name: mean_ci(
+                paired_difference(results[name]["folds"]["fold_scores"], blend["folds"]["fold_scores"])
+            )
+            for name in members
+        }
+        results["blend"] = blend
+
+    split_id = f"{splits['method']}-s{splits['seed']}-n{splits['n_splits']}"
+    payload = {
+        "dataset": args.dataset,
+        "artifacts": str(artifacts),
+        "members": members,
+        "split_id": split_id,
+        "ordered_dataset_sha256": fingerprint,
+        "n_rows": n_rows,
+        "git_commit": git_commit(),
+        "environment": env_snapshot(),
+        "fits_performed": 0,
+        "transductive": False,
+        "timing_note": (
+            "Post-hoc scoring of saved OOF: fit/infer seconds and peak RAM are properties of "
+            "the training run and are recorded by `cli train` in experiments/registry.csv, "
+            "not re-measured here."
+        ),
+        "results": results,
+    }
+    out_path = (
+        Path(args.out) if args.out else ARTIFACTS_DIR / "evaluate" / args.dataset / "metrics.json"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+
+    print(f"[evaluate] {split_id} | {n_rows} rows | fingerprint {str(fingerprint)[:16]}")
+    for name, entry in results.items():
+        ci = entry["fold_ci"]
+        print(
+            f"[evaluate] {name:22s} pooled BA {entry['balanced_accuracy']:.4f} | "
+            f"fold mean {entry['folds']['mean']:.4f} +/- {entry['folds']['std']:.4f} | "
+            f"95% CI [{ci['ci_low']:.4f}, {ci['ci_high']:.4f}] | macro F1 {entry['macro_f1']:.4f}"
+        )
+        if "paired_vs_members" in entry:
+            for other, diff in entry["paired_vs_members"].items():
+                print(
+                    f"[evaluate]   blend - {other}: {diff['mean']:+.4f} "
+                    f"[{diff['ci_low']:+.4f}, {diff['ci_high']:+.4f}]"
+                )
+    print(f"[evaluate] wrote {out_path}")
     return 0
 
 
 def cmd_predict(args) -> int:
+    if getattr(args, "crossed", False):
+        raise ValueError("crossed inference is withdrawn under D024; omit --crossed")
     cfg = load_config(args.config)
     train, test, truth, label = load_data(args.data_dir, args.synthetic)
     final_dir = (
@@ -188,20 +331,42 @@ def cmd_predict(args) -> int:
 
     manifest_path = final_dir / "manifest.json"
     if args.fit or not manifest_path.is_file():
+        pool_df = None
+        pool_models = list(getattr(args, "pool_models", []) or [])
+        if pool_models:
+            if not getattr(args, "pool", None):
+                raise ValueError("--pool-models requires --pool")
+            from src.pool import load_pool
+
+            pool_df = load_pool(args.pool)
+            known = {str(m["name"]) for m in cfg["models"]}
+            if not set(pool_models) <= known:
+                raise ValueError(f"--pool-models not in config: {sorted(set(pool_models) - known)}")
         manifest = fit_final(
-            cfg["models"], train, final_dir, seed=int(args.seed), dataset_label=label
+            cfg["models"], train, final_dir, seed=int(args.seed), dataset_label=label,
+            pool_df=pool_df, pool_models=pool_models,
+            cos_threshold=float(getattr(args, "cos_threshold", 0.3)),
+            pool_cap=int(getattr(args, "pool_cap", 12000)),
         )
-        print(f"[predict] refit on {len(train)} rows -> {manifest}")
+        tag = f" (pool for {pool_models}, cap {args.pool_cap})" if pool_df is not None else ""
+        print(f"[predict] refit on {len(train)} rows{tag} -> {manifest}")
     else:
         print(f"[predict] using existing artifacts in {final_dir}")
 
     weights_path = Path(args.weights) if args.weights else None
-    default_weights = Path(args.artifacts or ARTIFACTS_DIR / "cv" / label) / "ensemble" / "weights.json"
+    # A custom fitted-model directory may describe a different experiment. Do
+    # not silently attach global weights unless the caller also chose artifacts.
+    if args.final_dir is not None and args.artifacts is None:
+        default_weights = final_dir / "weights.json"
+    else:
+        default_weights = Path(args.artifacts or ARTIFACTS_DIR / "cv" / label) / "ensemble" / "weights.json"
     if weights_path is None and default_weights.is_file():
         weights_path = default_weights
         print(f"[predict] blending with {weights_path}")
     elif weights_path is None:
-        print("[predict] no ensemble weights; averaging available models equally")
+        if not args.synthetic:
+            raise FileNotFoundError("official prediction requires an explicit validated weights file")
+        print("[predict] no ensemble weights; averaging synthetic models equally")
 
     bundles, manifest = load_final(final_dir)
     weights = None
@@ -211,10 +376,7 @@ def cmd_predict(args) -> int:
         weights = load_weights(weights_path)
         missing = sorted(set(weights) - set(bundles))
         if missing:
-            print(f"[predict] weights reference models absent from {final_dir}: {missing}")
-            weights = {k: v for k, v in weights.items() if k in bundles}
-            total = sum(weights.values())
-            weights = {k: v / total for k, v in weights.items()}
+            raise ValueError(f"weights reference models absent from {final_dir}: {missing}")
 
     if args.crossed:
         from src.features_embedding import FrozenEncoder
@@ -256,8 +418,80 @@ def cmd_predict(args) -> int:
     return 0
 
 
+def _align_packaged_weights(weights_path: Path, manifest_path: Path) -> None:
+    """Drop CV fields measured for a different fit than the bundles being shipped.
+
+    The ensemble weights file is written by the official-only CV run, so its
+    recorded score describes that fit. When a member was refit with the external
+    pool the numbers no longer apply to this package (D037/D040).
+    """
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fit_modes = {
+        str(m["name"]): str(m.get("fit_mode", "train_only"))
+        for m in manifest.get("models", [])
+    }
+    pooled = sorted(n for n, mode in fit_modes.items() if "pool" in mode)
+    if not pooled:
+        return
+    doc = json.loads(weights_path.read_text(encoding="utf-8"))
+    for key in ("pooled_oof_balanced_accuracy", "best_single", "gain_over_best_single", "singles"):
+        doc.pop(key, None)
+    doc["fit_modes"] = fit_modes
+    doc["cv_score_of_record"] = "experiments/registry.csv"
+    doc["note"] = (
+        f"{', '.join(pooled)} refit on official train + globally decontaminated external "
+        "pool (D028/D037); the official-only CV fields were removed because they describe "
+        "a different fit. Blend rule and weights are unchanged."
+    )
+    weights_path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+
+
+def _package_licence(manifest_path: Path) -> tuple[str, str]:
+    """Licence name plus attribution block for the shipped weights (D050).
+
+    The weights are a derived adaptation of CC BY-SA 4.0 text — the official
+    train always, the external pool for any member fitted with it — so
+    share-alike travels with them. A synthetic-fixture package is locally
+    generated and carries no competition attribution.
+    """
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if str(manifest.get("dataset", "")) == "synthetic":
+        return "CC0-1.0", (
+            "\n## Licence\n\nSynthetic fixture artifacts generated locally for a smoke\n"
+            "run; no competition text was used. CC0-1.0.\n"
+        )
+    pool = manifest.get("pool") or {}
+    pooled = sorted(
+        str(m["name"]) for m in manifest.get("models", [])
+        if "pool" in str(m.get("fit_mode", ""))
+    )
+    lines = [
+        "\n## Licence and attribution\n",
+        "These fitted weights are a derived adaptation of CC BY-SA 4.0 text and are",
+        "redistributed under **CC BY-SA 4.0** — share-alike applies:",
+        "https://creativecommons.org/licenses/by-sa/4.0/\n",
+        "- Official training passages: Kaggle **Name That LLM**",
+        "  (https://www.kaggle.com/competitions/name-that-llm), data CC BY-SA 4.0.",
+    ]
+    if pooled:
+        lines += [
+            "- External training passages: **Open Pool v15**",
+            "  (https://www.kaggle.com/datasets/crtproduction/name-that-llm-open-pool),",
+            f"  CC BY-SA 4.0, used for {', '.join(pooled)} only",
+            f"  (`external_data_id: {pool.get('external_data_id', 'open-pool-v15')}`).",
+            "  The pool parquet is not shipped — only the fitted weights are.",
+        ]
+    lines += [
+        "\nNo raw competition rows, test text or labels are included; the bundles were",
+        "fitted locally and the training text is not redistributed here.\n",
+    ]
+    return "CC-BY-SA-4.0", "\n".join(lines)
+
+
 def cmd_package(args) -> int:
     """Copy a final artifact dir into an upload-ready Kaggle dataset folder."""
+    if getattr(args, "crossed", False):
+        raise ValueError("crossed inference packaging is withdrawn under D024; omit --crossed")
     import shutil
 
     final_dir = Path(args.final_dir) if args.final_dir else ARTIFACTS_DIR / "final" / args.dataset
@@ -271,6 +505,7 @@ def cmd_package(args) -> int:
     weights = ARTIFACTS_DIR / "cv" / args.dataset / "ensemble" / "weights.json"
     if weights.is_file():
         shutil.copy2(weights, out / "weights.json")
+        _align_packaged_weights(out / "weights.json", out / "manifest.json")
 
     # The pickled bundles reference src.model, so ship the source alongside.
     src_out = out / "src"
@@ -310,10 +545,11 @@ def cmd_package(args) -> int:
             "The encoder is loaded from the attached folder; no download at runtime.\n"
         )
 
+    licence, attribution = _package_licence(out / "manifest.json")
     metadata = {
         "title": f"name-that-llm artifacts ({args.dataset})",
         "id": f"{args.kaggle_user}/name-that-llm-artifacts",
-        "licenses": [{"name": "CC0-1.0"}],
+        "licenses": [{"name": licence}],
     }
     (out / "dataset-metadata.json").write_text(json.dumps(metadata, indent=1), encoding="utf-8")
     (out / "README.md").write_text(
@@ -321,8 +557,9 @@ def cmd_package(args) -> int:
         "Attach this dataset to `kaggle/submission.ipynb` as a notebook input.\n"
         "Contents: fitted models (`models/`), `manifest.json` (class order, run\n"
         "metadata), optional `weights.json` for blending, and `src/` needed to\n"
-        "unpickle the bundles. Generated locally; no competition data included.\n"
-        + encoder_note,
+        "unpickle the bundles. Generated locally; no raw competition rows included.\n"
+        + encoder_note
+        + attribution,
         encoding="utf-8",
     )
     size_mb = sum(p.stat().st_size for p in out.rglob("*") if p.is_file()) / 1024**2
@@ -488,7 +725,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_ens.add_argument("--artifacts", default=None)
     p_ens.add_argument("--dataset", default="official", choices=["official", "synthetic"])
     p_ens.add_argument("--out", default=None)
-    p_ens.set_defaults(func=cmd_ensemble)
+    p_ens.set_defaults(func=cmd_ensemble, config="configs/ensemble.yaml")
+
+    p_eval = sub.add_parser("evaluate", help="score saved identity-verified OOF (no fitting)")
+    add_common(p_eval, config=False)
+    p_eval.add_argument("--artifacts", default=None)
+    p_eval.add_argument("--dataset", default="official", choices=["official", "synthetic"])
+    p_eval.add_argument("--members", nargs="+", required=True, help="explicit OOF member names")
+    p_eval.add_argument("--weights", nargs="+", default=None, help="fixed blend weights, one per member")
+    p_eval.add_argument("--splits", default=None)
+    p_eval.add_argument("--length-bands", action="store_true", help="also score passage-length bands (reads train.csv)")
+    p_eval.add_argument("--out", default=None)
+    p_eval.set_defaults(func=cmd_evaluate)
 
     p_pred = sub.add_parser("predict", help="refit on all data and write a submission")
     add_common(p_pred)
@@ -498,8 +746,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--fit", action="store_true", help="force a refit on all train rows")
     p_pred.add_argument("--out", default=None)
     p_pred.add_argument(
+        "--pool", default=None,
+        help="external pool parquet; with --pool-models fits those members on train+clean pool (D028)",
+    )
+    p_pred.add_argument(
+        "--pool-models", nargs="*", default=[],
+        help="model names trained with the globally-decontaminated pool (e.g. char_tfidf_logreg)",
+    )
+    p_pred.add_argument("--pool-cap", type=int, default=12000,
+                        help="stratified cap on pool rows for the final fit (0 = full clean pool)")
+    p_pred.add_argument("--cos-threshold", type=float, default=0.3,
+                        help="global decontamination cosine threshold (D028)")
+    p_pred.add_argument(
         "--crossed", action="store_true",
-        help="cluster test passages into prompt groups and enforce one-per-model assignment (D016)",
+        help="withdrawn under D024; this option fails closed",
     )
     p_pred.add_argument(
         "--distance-threshold", type=float, default=0.4,
@@ -527,7 +787,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pkg.add_argument("--kaggle-user", default="your-kaggle-username")
     p_pkg.add_argument(
         "--crossed", action="store_true",
-        help="ship the MiniLM grouping encoder + inference.json for crossed inference (D016)",
+        help="withdrawn under D024; this option fails closed",
     )
     p_pkg.add_argument(
         "--encoder-path", default=None,

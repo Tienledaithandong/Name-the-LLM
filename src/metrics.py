@@ -183,6 +183,68 @@ def within_provider_confusions(
     }
 
 
+def length_band_metrics(
+    y_true,
+    y_pred,
+    lengths,
+    edges: Sequence[float] = (0, 50, 100, 200, 400, 800),
+    labels: Sequence[str] = LABELS,
+) -> list[dict]:
+    """Balanced accuracy and error mix per passage-length band (plan §9 item 9).
+
+    Bands are ``[edges[i], edges[i+1])`` with the last one open-ended, so a
+    length exactly on an edge belongs to the upper band. Each band's balanced
+    accuracy averages only the classes it contains; bands with different class
+    coverage are therefore not directly comparable, which is why
+    ``classes_present`` is reported alongside it. Empty bands yield ``None``.
+    """
+    yt = _as_label_array(y_true)
+    yp = _as_label_array(y_pred)
+    if yt.shape != yp.shape:
+        raise ValueError(f"shape mismatch: {yt.shape} vs {yp.shape}")
+    words = np.asarray(lengths, dtype=np.float64)
+    if words.shape != yt.shape:
+        raise ValueError(f"length shape mismatch: {words.shape} vs {yt.shape}")
+    if not np.isfinite(words).all() or (words < 0).any():
+        raise ValueError("lengths must be finite and non-negative")
+    bounds = [float(e) for e in edges]
+    if not bounds or bounds[0] != 0.0:
+        raise ValueError("edges must start at 0 so every passage is banded")
+    if any(b <= a for a, b in zip(bounds, bounds[1:])):
+        raise ValueError("edges must be strictly increasing")
+
+    out: list[dict] = []
+    for i, lower in enumerate(bounds):
+        upper = bounds[i + 1] if i + 1 < len(bounds) else None
+        mask = words >= lower
+        if upper is not None:
+            mask &= words < upper
+        n = int(mask.sum())
+        band = {
+            "band": f"[{lower:g}, {upper:g})" if upper is not None else f"[{lower:g}, inf)",
+            "lower": lower,
+            "upper": upper,
+            "n": n,
+            "classes_present": int(np.unique(yt[mask]).size) if n else 0,
+            "balanced_accuracy": None,
+            "accuracy": None,
+            "errors": 0,
+            "within_provider_errors": 0,
+            "cross_provider_errors": 0,
+            "mean_words": None,
+            "median_words": None,
+        }
+        if n:
+            truth, pred = yt[mask], yp[mask]
+            band["balanced_accuracy"] = balanced_accuracy(truth, pred, labels)
+            band["accuracy"] = float((truth == pred).mean())
+            band.update(within_provider_confusions(truth, pred, labels))
+            band["mean_words"] = float(words[mask].mean())
+            band["median_words"] = float(np.median(words[mask]))
+        out.append(band)
+    return out
+
+
 def reports_frame(results: Sequence[dict]) -> pd.DataFrame:
     """Tabular view used by reports and the registry."""
     rows = []

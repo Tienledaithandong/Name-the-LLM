@@ -1,34 +1,8 @@
-"""Evaluation protocol: primary grouped OOF + k-subsampled paired-difference stress test.
+"""Historical k-subsampled, transductive research helpers.
 
-PRIMARY (independent-passage models). The argmax prediction for a row does not
-depend on how many sibling passages are scored alongside it, so the **full
-prompt-grouped out-of-fold balanced accuracy over ALL rows** is the most
-statistically efficient estimate and the MAIN comparison for the argmax blend
-(and any per-passage model: DeBERTa, GBDT, ...). We report pooled OOF, per-fold
-mean/std, per-class recall and within-provider confusions.
-
-STRESS TEST (batch/group-dependent methods only). The hidden test is believed to
-have ~1-3 passages per prompt (k~2), not the train set's k=18 (D017). Transductive
-post-processing -- recovered-group Hungarian and damped Sinkhorn -- can exploit
-batch structure that the test does not have. We therefore subsample the pooled
-OOF to k=1,2,3,18 passages per prompt, repeatedly over several subsample seeds,
-and report **paired differences** (method - argmax) on the SAME subsampled rows:
-mean +/- sample std and a 95% Student-t CI across seeds. This measures whether a
-batch method helps or hurts at a test-like k. It is INFERENCE-ONLY: these methods
-are never part of the primary CV score (hard rule: no transductive steps in
-reported scores). We report FIXED settings, not a best-of grid -- selecting the
-best setting on the stress test would be tuning on it.
-
-Holdout. The seed-7 holdout has been EXAMINED repeatedly (D015-D017) and is no
-longer "untouched". A FRESH holdout (seed 2027) is reserved for final selection
-and is NOT scored here; create/persist it with --reserve-fresh-holdout.
-
-All local research on train data; no test.csv, no submission. Blend members and
-0.5/0.5 weights are fixed (the adopted models); only the evaluation k varies.
-
-Run:
-    python experiments/stress_k.py --data-dir data
-    python experiments/stress_k.py --data-dir data --reserve-fresh-holdout
+The executable command is retired under D024: transductive steps cannot be
+used in reported scores, and the seed-2027 subset was part of earlier
+full-OOF development. Historical functions remain only for reproducibility.
 """
 
 from __future__ import annotations
@@ -196,72 +170,19 @@ def _fmt_ci(d):
 
 
 def main() -> None:
+    """Retire the historical transductive reporting command under D024."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--splits", default="cv_s42,holdout_s7")
     parser.add_argument("--ks", default="1,2,3,18")
     parser.add_argument("--sub-seeds", default="0,1,2,3,4,5,6,7,8,9")
-    parser.add_argument("--reserve-fresh-holdout", action="store_true",
-                        help="persist a fresh seed-2027 holdout without scoring it")
-    args = parser.parse_args()
-
-    train_df, _ = load_competition_data(args.data_dir)
-    out_dir = ARTIFACTS_DIR / "stress_k"
-
-    if args.reserve_fresh_holdout:
-        note = reserve_fresh_holdout(train_df, out_dir)
-        print("Fresh holdout RESERVED (not scored):", json.dumps(note, indent=1))
-        return
-
-    groups = train_df["prompt_id"].astype(str).to_numpy()
-    y = labels_to_indices(train_df["model"].tolist())
-    texts = train_df["text"].tolist()
-    ks = [int(k) for k in args.ks.split(",")]
-    sub_seeds = [int(s) for s in args.sub_seeds.split(",")]
-
-    encoder = FrozenEncoder(backend="sentence-transformers")
-    emb = np.asarray(encoder.encode_cached(texts), dtype=np.float32)
-
-    split_pairs = {}
-    for name in args.splits.split(","):
-        if name.startswith("cv_s"):
-            folds, _ = make_splits(train_df, n_splits=5, seed=int(name[4:]))
-            split_pairs[name] = folds
-        elif name.startswith("holdout_s"):
-            tr, ho = make_holdout(train_df, n_groups=25, seed=int(name[9:]))
-            split_pairs[name] = [(tr, ho)]
-        else:
-            raise ValueError(f"unknown split {name}")
-
-    results = {}
-    for name, pairs in split_pairs.items():
-        print(f"{name}: computing pooled OOF + stress...", flush=True)
-        results[name] = run_stress(pairs, texts, y, groups, emb, ks, sub_seeds)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
-
-    print("\n=== PRIMARY: full prompt-grouped OOF (independent-passage argmax blend) ===\n")
-    for name, r in results.items():
-        p = r["primary"]
-        wp = p["within_provider"]
-        share = wp["within_provider_errors"] / wp["errors"] if wp["errors"] else 0.0
-        print(f"{name}: pooled OOF BA = {p['pooled_oof_balanced_accuracy']:.4f} "
-              f"({p['n_rows']} rows) | folds {p['fold_mean']:.4f}+/-{p['fold_std']:.4f} "
-              f"| within-provider {share:.1%}")
-
-    print("\n=== STRESS TEST (inference-only; paired diff vs argmax, mean±std [95% CI]) ===")
-    print("Not a selection score; transductive methods are excluded from the primary CV.\n")
-    for name, r in results.items():
-        print(f"\n{name}  (fit {r['fit_seconds']}s, {len(sub_seeds)} subsample seeds)")
-        for k in ks:
-            b = r["stress"][f"k{k}"]
-            print(f"  k={k:<2} rows~{b['n_rows_mean']:>5.0f}  argmax {_fmt_ci(b['argmax'])}")
-            for m in ["hungarian_rec"] + [f"sinkhorn_s{s}_m{m2}" for s, m2 in SINKHORN_SETTINGS]:
-                pd = b[m]["paired_diff"]
-                print(f"        {m:<22} delta={pd['mean']:+.4f}+/-{pd['std']:.4f} "
-                      f"[{pd['ci_low']:+.4f},{pd['ci_high']:+.4f}]")
-    print(f"\nresults written to {out_dir / 'results.json'}")
+    parser.add_argument("--reserve-fresh-holdout", action="store_true")
+    parser.parse_args()
+    raise SystemExit(
+        "[abort] D024: transductive methods are prohibited in reported scores; "
+        "the seed-2027 subset is not an untouched final holdout. "
+        "Use experiments/prepare_nested_splits.py for non-transductive evaluation."
+    )
 
 
 if __name__ == "__main__":

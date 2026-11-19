@@ -73,6 +73,16 @@ What this means for modelling:
   plain accuracy almost coincide — but the hidden test mix is unequal, so
   balanced accuracy remains the right metric.
 - **No duplicate texts**, so no exact-duplicate leakage across folds.
+- **No near-duplicate crosses a fold either (D047).** Exact equality is a weak
+  test, so `experiments/near_duplicates.py` measured all 3,640,951 unordered
+  official-train pairs with the same word TF-IDF (1–2 grams, sublinear tf, l2,
+  30k features) and 0.3 threshold as the external-pool screen: 2,190 pairs above
+  0.3 and 34 above 0.5, **every one same-prompt, zero cross-fold**; nothing above
+  0.7, corpus maximum 0.6223. The similarity that exists is the shared question
+  vocabulary of the 18 answers to one prompt, which the grouped split keeps on
+  one side. Descriptive audit — no predictor fit, no score, no test row; stores
+  ids/fold numbers/cosines only. Similarity is a heuristic, not proof that every
+  augmented variant was found.
 - **No markdown/emoji** anywhere: those stylometric columns are constant on
   official data (harmless after outlier-safe scaling, but they carry no signal,
   unlike on the synthetic fixture).
@@ -96,7 +106,12 @@ What this means for modelling:
 - [x] `n_labels_present == 18`; every class has 150 prompt groups, so the
   stratified-group splitter is valid.
 - [x] duplicate-text check: zero.
-- [ ] Inspect length-band performance once model results exist (the p05–p95 range
-  is 44–224 words; short passages are the likely weak spot).
+- [x] near-duplicate check across folds: zero at every threshold up to 0.9
+  (`artifacts/near_duplicates/results.json`, D047).
+- [x] Inspect length-band performance once model results exist — measured by
+  `experiments/length_sensitivity.py` (D041): accuracy rises monotonically with
+  length, 0.2491 (<50 words) → 0.4718 (≥200) for the official blend and
+  0.3125 → 0.5858 for the pool-MIX candidate. Short passages are confirmed as the
+  weak spot; all 18 classes occur in every band. Report §8.2.
 - [ ] Confirm the hidden test row count and label mix after the first scored
   submission — neither is knowable locally.

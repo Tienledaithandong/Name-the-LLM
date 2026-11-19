@@ -40,6 +40,8 @@ python -m src.cli audit  --data-dir data             # dataset audit + figures
 python -m src.cli splits --data-dir data             # frozen grouped folds
 python -m src.cli train  --config configs/baseline.yaml --data-dir data
 python -m src.cli ensemble --dataset official
+python -m src.cli evaluate --dataset official --artifacts artifacts/cv_identity/official \
+    --members char_tfidf_logreg style_only --weights 0.5 0.5   # score saved OOF, no fit
 python -m src.cli stability --data-dir data          # blend robustness checks
 python -m src.cli predict --config configs/submission.yaml --data-dir data --fit
 python -m src.cli package --kaggle-user <user>       # upload-ready artifact folder

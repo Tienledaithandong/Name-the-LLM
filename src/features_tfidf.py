@@ -21,7 +21,6 @@ from src.features_embedding import FrozenEncoder
 from src.features_multilayer import MultiLayerReadoutBuilder
 from src.features_style import StyleFeatureExtractor
 from src.prompt_invariance import NuisanceSuppressor
-from src.residual import PromptMeanNeutralizer
 
 TFIDF_KINDS = ("char", "word", "char_wb")
 
@@ -85,8 +84,6 @@ class TextMatrixBuilder:
         nuisance_min_group: int = 4,
         embedding: dict[str, Any] | None = None,
         multilayer: dict[str, Any] | None = None,
-        residual_lambda: float = 0.0,
-        residual_alpha: float = 1.0,
     ):
         self.kinds = tuple(kinds)
         self.style = bool(style)
@@ -102,21 +99,10 @@ class TextMatrixBuilder:
                 raise FeatureError(f"unknown tf-idf kind {kind!r}")
         if nuisance_k and not svd:
             raise FeatureError("nuisance suppression requires an SVD reduction (dense space)")
-        residual_lambda = float(residual_lambda)
-        if not 0.0 <= residual_lambda <= 1.0:
-            raise FeatureError("residual_lambda must be in [0, 1]")
-        if residual_lambda and not svd and self.kinds:
-            raise FeatureError(
-                "residual neutralisation requires dense input — set an svd size "
-                "or use style-only features"
-            )
         self.params = {**DEFAULT_PARAMS, **(params or {})}
         self.svd = svd
         self.nuisance_k = int(nuisance_k)
         self.nuisance_min_group = int(nuisance_min_group)
-        self.residual_lambda = residual_lambda
-        self.residual_alpha = float(residual_alpha)
-        self.residual_: PromptMeanNeutralizer | None = None
         self._vectorizers: list[TfidfVectorizer] = []
         self._style_extractor: StyleFeatureExtractor | None = None
         self._style_scaler: StandardScaler | None = None
@@ -188,23 +174,6 @@ class TextMatrixBuilder:
                     n_components=self.nuisance_k, min_group_size=self.nuisance_min_group
                 ).fit(dense, groups)
             matrix = self._suppressor.transform(dense)
-        if self.residual_lambda > 0:
-            if fit and groups is None:
-                raise FeatureError("residual neutralisation needs prompt groups to fit")
-            dense = (
-                matrix.toarray()
-                if sparse.issparse(matrix)
-                else np.asarray(matrix, dtype=np.float32)
-            )
-            if fit:
-                self.residual_ = PromptMeanNeutralizer(
-                    alpha=self.residual_alpha, shrinkage=self.residual_lambda
-                ).fit(dense, groups)
-            if self.residual_ is None:
-                raise FeatureError(
-                    "residual neutralisation was configured but no neutralizer was fitted"
-                )
-            matrix = self.residual_.transform(dense)
         return matrix
 
     # -- public API --------------------------------------------------------

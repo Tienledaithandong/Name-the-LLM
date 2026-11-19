@@ -35,8 +35,6 @@ class ModelSpec:
     min_df: int | None = None
     svd: int | None = None
     nuisance_k: int = 0
-    residual_lambda: float = 0.0
-    residual_alpha: float = 1.0
     embedding: dict[str, Any] | None = None
     multilayer: dict[str, Any] | None = None
     class_weight: str | None = "balanced"
@@ -60,13 +58,6 @@ class ModelSpec:
             )
         if spec.nuisance_k and not spec.svd:
             raise ModelError(f"model {spec.name}: nuisance_k requires an svd size")
-        if not 0.0 <= float(spec.residual_lambda) <= 1.0:
-            raise ModelError(f"model {spec.name}: residual_lambda must be in [0, 1]")
-        if spec.residual_lambda and spec.features and not spec.svd:
-            raise ModelError(
-                f"model {spec.name}: residual_lambda requires dense input — set an svd "
-                "size or use style-only features"
-            )
         if spec.classifier in DENSE_CLASSIFIERS and spec.features and not spec.svd:
             raise ModelError(
                 f"model {spec.name}: {spec.classifier} needs dense input — set an svd size "
@@ -85,8 +76,6 @@ class ModelSpec:
             "min_df": self.min_df,
             "svd": self.svd,
             "nuisance_k": self.nuisance_k,
-            "residual_lambda": self.residual_lambda,
-            "residual_alpha": self.residual_alpha,
             "embedding": self.embedding,
             "class_weight": self.class_weight,
             "params": self.params,
@@ -233,8 +222,6 @@ class ModelBundle:
             nuisance_k=spec.nuisance_k,
             embedding=spec.embedding,
             multilayer=spec.multilayer,
-            residual_lambda=spec.residual_lambda,
-            residual_alpha=spec.residual_alpha,
         )
         self.classifier = classifier or build_classifier(spec)
 

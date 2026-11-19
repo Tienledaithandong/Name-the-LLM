@@ -2199,9 +2199,11 @@ The oracle ceiling is retained as the measured headroom: exact within-prompt
 centring still reaches 0.3575 on style features, so the between-prompt component
 is worth removing *when the groups are known*. The failure is specifically that a
 single passage cannot predict its own prompt's mean well enough to do it without
-them. The `PromptMeanNeutralizer` and the `residual_lambda` builder stage stay in
-the tree as tested infrastructure; no config enables them by default and no
-submission uses them.
+them. `src/residual.py` and the two experiment scripts stay in the tree: they are what
+produced these numbers, and the module is covered by tests. The
+`residual_lambda` stage that had been added to `TextMatrixBuilder` and
+`ModelSpec` was removed afterwards, since the experiment called the neutralizer
+directly and nothing else used the wiring.
 
 The nested replay scored **0.373743** versus **0.351892** for the matched
 baseline, a gain of **+0.021852** (paired prompt interval

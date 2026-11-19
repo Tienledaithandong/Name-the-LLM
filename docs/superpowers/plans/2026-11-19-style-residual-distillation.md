@@ -16,6 +16,10 @@ P3 calibration sweep) were not started, per the spec's "no GPU spend after a
 failed R2/D010 comparison" rule. The unused tasks stay below as the shape any
 revival would take.
 
+Task 2's `TextMatrixBuilder`/`ModelSpec` wiring was removed afterwards: the
+runner calls `PromptMeanNeutralizer` directly, so the extra stage was dead code
+and its tests went with it. `src/residual.py` and both experiment scripts stay.
+
 ## Global Constraints
 
 - Prompt-grouped folds only; every learned transform (vectorizers, scaler, SVD, D010 suppressor, neutralizer, λ) fitted on the training side of the fold. Reuse `load_splits` / `validate_splits`; never recompute prompt means from validation or test rows.

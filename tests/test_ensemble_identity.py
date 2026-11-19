@@ -7,7 +7,7 @@ import pytest
 from types import SimpleNamespace
 
 from src.constants import LABELS
-from src.ensemble import greedy_blend, load_oof
+from src.ensemble import SENTINEL, _score_with_weights, greedy_blend, load_oof, normalize_scores
 
 
 def _write(path, *, fingerprint="a" * 64, folds=(0, 1), identity=True):
@@ -82,3 +82,15 @@ def test_inference_rejects_invalid_blend_weights(tmp_path, value) -> None:
     path.write_text(json.dumps({"model": value}), encoding="utf-8")
     with pytest.raises(ValueError, match="finite and nonnegative"):
         load_weights(path)
+
+
+def test_missing_class_in_one_member_does_not_veto_another_member() -> None:
+    first = normalize_scores(np.array([[2.0, 0.0, SENTINEL * 10]]))
+    second = normalize_scores(np.array([[0.0, 0.0, 10.0]]))
+
+    blended = _score_with_weights(
+        {"first": first, "second": second},
+        {"first": 0.5, "second": 0.5},
+    )
+
+    assert blended.argmax(axis=1).tolist() == [2]

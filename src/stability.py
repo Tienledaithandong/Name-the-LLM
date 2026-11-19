@@ -5,11 +5,12 @@ gain is mildly optimistic.  These checks re-measure it on *different* prompt
 partitions without re-tuning anything:
 
 * ``seed_stability`` re-runs grouped CV for the blend members under alternative
-  fold seeds and re-selects the greedy blend on each, reporting the gain.
-* ``holdout_check`` fits the members once on the training side of the untouched
+  fold seeds and evaluates fixed blend weights on each, reporting the gain.
+* ``holdout_check`` fits the members once on the training side of the
   secondary prompt-held-out split and scores the fixed adopted weights there.
+  This is exploratory if those prompts were used during selection.
 
-Neither is used to pick the winner; they only confirm or refute the seed-42 gain.
+These checks are exploratory when selection used the same data.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.data import indices_to_labels, labels_to_indices
-from src.ensemble import normalize_scores, run_ensemble
+from src.ensemble import evaluate_blend, load_oof, normalize_scores
 from src.metrics import balanced_accuracy, evaluate
 from src.model import estimator_from_config
 from src.repro import git_commit
@@ -35,6 +36,7 @@ def seed_stability(
     dataset_label: str = "official",
     registry_path=None,
     n_splits: int = 5,
+    weights: dict[str, float] | None = None,
 ) -> list[dict]:
     out_root = Path(out_root)
     rows: list[dict] = []
@@ -52,7 +54,18 @@ def seed_stability(
             registry_path=registry_path,
             split_id=f"{method}-s{seed}-n{len(folds)}",
         )
-        ens = run_ensemble(run_dir, max_models=4)
+        oof = load_oof(run_dir)
+        active = weights or {name: 1.0 / len(oof) for name in oof}
+        if not set(active).issubset(oof):
+            raise ValueError("stability weights reference missing models")
+        normalized = {name: normalize_scores(item["scores"]) for name, item in oof.items()}
+        y = next(iter(oof.values()))["y"]
+        blend = evaluate_blend(normalized, y, active)["balanced_accuracy"]
+        singles = {name: evaluate_blend(normalized, y, {name: 1.0})["balanced_accuracy"] for name in oof}
+        best = max(singles, key=singles.get)
+        ens = {"weights": active, "pooled_oof_balanced_accuracy": blend,
+               "best_single": {"model": best, "balanced_accuracy": singles[best]},
+               "gain_over_best_single": blend - singles[best]}
         rows.append(
             {
                 "seed": int(seed),
@@ -125,7 +138,7 @@ def run_stability(
     out_root.mkdir(parents=True, exist_ok=True)
     seed_rows = seed_stability(
         train_df, member_configs, seeds, out_root,
-        dataset_label=dataset_label, registry_path=registry_path,
+        dataset_label=dataset_label, registry_path=registry_path, weights=weights,
     )
     holdout = holdout_check(
         train_df, member_configs, weights, seed=holdout_seed, n_groups=holdout_groups
@@ -171,9 +184,9 @@ def _write_report(path: Path, summary: dict, dataset_label: str) -> None:
         f"- dataset: **{dataset_label}**",
         f"- generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "- purpose: confirm the seed-42 blend gain on other prompt partitions;",
-        "  these runs never re-tune the weights or select the winner.",
+        "  weights are fixed; the secondary split is exploratory if used during selection.",
         "",
-        "## Alternative fold seeds (greedy blend re-selected per seed)",
+        "## Alternative fold seeds (fixed weights)",
         "",
         "| seed | blend pooled OOF | best single | gain | weights |",
         "|---|---|---|---|---|",

@@ -4,7 +4,7 @@ Refits the adopted blend (char_tfidf_logreg + style_only, 0.5/0.5) and tests the
 full recovered-grouping pipeline on:
 
 * the secondary prompt-held-out split (make_holdout, seed 7, 25 prompts) --
-  untouched by model selection;
+  exploratory: these prompts were included in earlier CV/model selection;
 * alternative grouped-CV fold seeds (7 and 13) -- refit OOF, then cluster each
   fold's validation passages label-free and assign.
 

@@ -3,13 +3,42 @@
 Frozen before the first scored experiment. Any change here is an ADR in
 `docs/decisions.md` and invalidates previously recorded comparisons.
 
+## Independent holdout protocol (new; historical scores are exploratory)
+
+Historical secondary holdouts were drawn after CV/selection on the full dataset;
+their prompts may have influenced selection. They are not independent. Reserve
+prompts **before** any experiments, keeping both CSVs private and ignored:
+
+```bash
+python -m src.cli reserve-holdout --data-dir data --out data/reserved --holdout-groups 25 --seed 7
+mkdir -p data/selection
+cp data/reserved/selection.csv data/selection/train.csv
+cp data/test.csv data/selection/test.csv
+```
+
+Perform *all* CV, tuning and blend selection using `data/selection` only. Fit
+final models on that selection subset and save their provenance-bearing weights.
+Then, once choices are frozen, score the reserved rows with:
+
+```bash
+python -m src.cli score-reserved --selection data/reserved/selection.csv \
+  --holdout data/reserved/holdout.csv --final-dir artifacts/final/official \
+  --weights artifacts/cv/official/ensemble/weights.json --config configs/submission.yaml
+```
+
+The command checks prompt/ID disjointness and selection artifact provenance;
+it cannot prove the user never inspected or used the holdout. Do not retune on
+its result. Reserve a new independent dataset for subsequent selection cycles.
+The old `stability` command remains exploratory; alternate seeds now evaluate
+fixed weights rather than reselecting them.
+
 ## 1. Splits
 
 - **Primary:** `StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)`
   on `prompt_id` groups, falling back to `GroupKFold(5)` when a class has fewer
   than five prompt groups (`src/validation.make_splits`, method `auto`).
-- **Secondary (robustness):** prompt-held-out split with a different seed
-  (`make_holdout`). Used only for the final check, never for selection.
+- **Historical secondary (exploratory):** `make_holdout` partitions the same
+  data used for selection; it is not an independent holdout.
 - **Repeatability:** seed checks with 2–3 alternative seeds are reported as a
   stability check, not used to pick the winner. Implemented by
   `src/stability.py` (`python -m src.cli stability`, `make stability`), which
@@ -36,8 +65,9 @@ For each fold, and only on the training side, we fit:
 4. the nuisance-suppression projection (training prompts only),
 5. the classifier and its class weights.
 
-The validation side is only ever transformed. No transductive step is used for
-any reported score. `tests/test_features.py` asserts that a token present only
+The validation side is only ever transformed for standard model fitting.
+Crossed-design research scores explicitly use transductive grouping of validation
+passages, and are reported separately from standard grouped-CV scores. `tests/test_features.py` asserts that a token present only
 in validation text is absent from the fitted vocabulary.
 
 ## 3. Metric and reporting

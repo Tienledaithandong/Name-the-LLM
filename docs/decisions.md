@@ -1,5 +1,9 @@
 # Decisions
 
+> **Validation caveat (review):** historical secondary-split results are
+> exploratory, not independent: their prompts were included in the data used
+> for CV/model selection. See `docs/experiment_protocol.md` for pre-reservation.
+
 Short ADRs. Newest last. Each entry records the decision, why, and what would
 reopen it.
 
@@ -142,7 +146,7 @@ members and re-validate on the registered folds before packaging.
 
 Ran `src/stability.py` (`make stability`) on official data. Alternative fold
 seeds 7 and 13 re-select the identical 0.5/0.5 char+style blend with gains +0.0452
-and +0.0441 over the best single; the untouched secondary prompt-held-out split
+and +0.0441 over the best single; the historical secondary prompt-held-out split
 (25 prompts, 450 rows, seed 7) scores the fixed blend at 0.3956, +0.0222 over the
 best single (char 0.3733, style 0.2822). Recorded in `experiments/registry.csv`
 and report §6.5.
@@ -164,7 +168,7 @@ backend) and benchmarked a frozen `all-MiniLM-L6-v2` encoder (Apache-2.0,
 Embeddings-only scores 0.1278 pooled OOF; embeddings+style 0.3093 (vs char
 0.3193, style 0.2904, blend 0.3760). Greedy blending picks
 0.5×char + 0.5×(embeddings+style) at 0.3786 — only +0.0026 over the adopted
-blend — but on the untouched secondary holdout that blend scores 0.3933 versus
+blend — but on the historical secondary holdout that blend scores 0.3933 versus
 char+style 0.3956 (−0.0023). The marginal CV gain reverses out of sample, so it
 is selection noise. Recorded in `experiments/registry.csv` (external_data_id
 `minilm-l6-v2`), `docs/external_data_register.md`, and report §6.6.
@@ -257,7 +261,7 @@ fixed; only grouping + assignment are added at inference.
 
 | split | argmax | oracle assign | recovered (thr 0.4) | recovered (k=rows/18) | purity (k) |
 |---|---|---|---|---|---|
-| untouched holdout s7 (25 prompts) | 0.3956 | 0.4933 | **0.5000** | 0.4933 | 1.000 |
+| historical secondary split s7 (25 prompts) | 0.3956 | 0.4933 | **0.5000** | 0.4933 | 1.000 |
 | grouped CV seed 7 | 0.3608 | 0.4808 | 0.4716 | 0.4712 | 0.940 |
 | grouped CV seed 13 | 0.3582 | 0.4742 | 0.4657 | 0.4631 | 0.940 |
 
@@ -287,3 +291,13 @@ from the attached dataset (Kaggle inference has no internet).
 Reopen if: the owner's LB submission with crossed inference does not beat 0.356,
 or real-test purity collapses (detectable as a degenerate label distribution /
 many duplicate-model groups) — fall back to the argmax blend, then Phase C/D.
+
+
+## D017 — Provenance and independent evaluation (review follow-up)
+
+Saved folds and OOF files now require order-sensitive data and fold provenance;
+legacy artifacts must be regenerated. Blend selection enforces its minimum gain,
+and alternate-seed checks use fixed weights. The former secondary holdout was
+not independent of selection; its numbers remain historical exploratory results.
+Future independent evaluations reserve prompt groups before selection as
+specified in `docs/experiment_protocol.md`. No new official score is claimed.

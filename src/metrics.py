@@ -58,17 +58,16 @@ def macro_f1(y_true, y_pred, labels: Sequence[str] = LABELS) -> float:
     """Unweighted mean F1 over labels with support (diagnostic only)."""
     yt = _as_label_array(y_true)
     yp = _as_label_array(y_pred)
+    if yt.shape != yp.shape:
+        raise ValueError(f"shape mismatch: {yt.shape} vs {yp.shape}")
     scores = []
     for label in labels:
         true_pos = int(((yt == label) & (yp == label)).sum())
         support = int((yt == label).sum())
         predicted = int((yp == label).sum())
-        if support == 0 or predicted == 0:
+        if support == 0:
             continue
-        precision = true_pos / predicted
-        recall = true_pos / support
-        if precision + recall > 0:
-            scores.append(2 * precision * recall / (precision + recall))
+        scores.append(2 * true_pos / (support + predicted))
     return float(np.mean(scores)) if scores else float("nan")
 
 

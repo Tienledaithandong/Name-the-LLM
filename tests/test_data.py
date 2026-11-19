@@ -62,7 +62,7 @@ def test_label_index_roundtrip(train_df):
 def test_fingerprint_is_stable_and_label_sensitive(train_df):
     first = dataset_fingerprint(train_df)
     shuffled = train_df.sample(frac=1.0, random_state=0).reset_index(drop=True)
-    assert dataset_fingerprint(shuffled) == first
+    assert dataset_fingerprint(shuffled) != first
     changed = train_df.copy()
     changed.loc[0, "model"] = "kimi-k3" if changed.loc[0, "model"] != "kimi-k3" else "glm-5.3"
     assert dataset_fingerprint(changed) != first

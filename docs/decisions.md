@@ -2205,6 +2205,56 @@ produced these numbers, and the module is covered by tests. The
 `ModelSpec` was removed afterwards, since the experiment called the neutralizer
 directly and nothing else used the wiring.
 
+## D059 — D010 rank and SVD-width sweep as a third blend member (2026-11-19)
+
+D058 left one cell where removing prompt directions helped: `char` TF-IDF ->
+128 SVD -> project out the top 4 between-prompt directions, then logistic
+regression, at **0.2563** pooled OOF. The adopted blend scores **0.375971**.
+This screen asks whether that cell, swept over SVD width and removed rank, lifts
+the blend.
+
+Recipe fixed before scoring: equal weight on the two adopted members and the
+candidate, `(z_char + z_style + z_candidate) / 3`, with no weight search on the
+OOF. `python -m experiments.sweep_d010 --splits
+artifacts/splits/splits_official_verified_s42.json`, split
+`stratified_group-s42-n5`, 1376.08 s for the 12-cell grid. The adopted control was
+rebuilt from the registered members and matched 0.375971 before any delta was
+reported.
+
+| SVD width | single-view range over k = 2, 4, 8, 16 | blend range | delta vs adopted |
+|---|---|---|---|
+| 64 | 0.1978-0.2082 | 0.3697-0.3719 | -0.0063 to -0.0041 |
+| 128 | 0.2560-0.2593 | **0.3830-0.3856** | **+0.0070 to +0.0096** |
+| 256 | 0.2679-0.2786 | 0.3619-0.3656 | -0.0141 to -0.0104 |
+
+Best cell **svd128, k=8**: 0.3856 (+0.0096). Per-fold deltas against the adopted
+blend (folds 0.3779 / 0.3759 / 0.3796 / 0.3741 / 0.3722): **+0.0056 / -0.0019 /
++0.0056 / +0.0037 / +0.0352**. Paired prompt bootstrap, 4000 draws, second run
+(`artifacts/residual/d010_svd128_ci.json`, 514.37 s):
+
+| cell | blend | delta | paired 95% interval |
+|---|---|---|---|
+| svd128, k=2 | 0.3841 | +0.0081 | [-0.0019, +0.0182] |
+| svd128, k=4 | 0.3830 | +0.0070 | [-0.0030, +0.0170] |
+| svd128, k=8 | 0.3856 | +0.0096 | [-0.0004, +0.0196] |
+| svd128, k=16 | 0.3849 | +0.0089 | [-0.0015, +0.0193] |
+
+Verdict: **not promoted**. The selection gate requires a gain that is not carried
+by one fold and a paired interval excluding zero; neither holds. Fold 4 supplies
++0.0352 of the +0.0096 pooled gain while folds 0-3 are flat to slightly negative,
+and every interval includes zero. The effect also depends on SVD width alone: all
+four ranks inside the 128-wide view land within 0.003 of each other, while the
+64-wide view loses the signal and the 256-wide view turns negative. A plausible
+reading is that a 128-dim char view is complementary to the adopted char/style
+members, while 64 dims is too lossy and 256 dims is dominated by prompt variance
+that the projection does not remove — a hypothesis, not a measured cause.
+
+Before this could be adopted it needs the protocol's nested route: choose
+(svd, k) by inner prompt-grouped CV inside each outer training fold, score the
+fixed equal-thirds blend once on the outer holdout, then repeat on seed 13. None
+of that has been run, no submission uses this cell, and the adopted blend and
+submission are unchanged.
+
 The nested replay scored **0.373743** versus **0.351892** for the matched
 baseline, a gain of **+0.021852** (paired prompt interval
 **[+0.010720, +0.033704]**). It chose the frozen blend in two outer folds and

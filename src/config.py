@@ -67,3 +67,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
 def feature_params(cfg: dict[str, Any]) -> dict[str, Any]:
     return dict(cfg.get("features", {}))
+
+
+def resolved_models(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apply shared feature defaults, with model-specific settings taking precedence."""
+    return [{**cfg.get("features", {}), **model} for model in cfg["models"]]

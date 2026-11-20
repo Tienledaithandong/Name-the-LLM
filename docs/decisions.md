@@ -2337,3 +2337,20 @@ arXiv:2610.28434 (multi-resolution fingerprints survive distillation),
 arXiv:2610.19583 (ATLAS source-conditioned likelihood), and the
 Multi-Layer LoRA Readouts / WSDM-LMSYS recipes. It is the design-only
 implementation stage; scores are not claimed.
+
+## D061 — Provenance and independent evaluation (review follow-up)
+
+Renumbered from D017: this branch already used D017–D059 (and D060 lives on
+`sascr-methodology`), so the ADR that arrived with `origin/master`'s hardening
+commit (`d3547e3`) is recorded here instead. Content is unchanged apart from the
+number.
+
+Saved folds and OOF files now require order-sensitive data and fold provenance;
+legacy artifacts must be regenerated. Blend selection enforces its minimum gain,
+and alternate-seed checks use fixed weights. The former secondary holdout was
+not independent of selection; its numbers remain historical exploratory results.
+Future independent evaluations reserve prompt groups before selection as
+specified in `docs/experiment_protocol.md`. No new official score is claimed.
+
+Reopen if: a caller needs the older lenient behaviour for legacy artifacts, in
+which case regenerate the artifacts rather than relaxing the checks.

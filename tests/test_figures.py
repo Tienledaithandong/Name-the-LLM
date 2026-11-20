@@ -20,9 +20,12 @@ def _write_artifacts(root, names, n=36, seed=0):
             root / "oof" / f"{name}.npz",
             scores=scores,
             y=y.astype(np.int64),
-            labels=np.asarray(LABELS, dtype=object),
+            labels=np.asarray(LABELS, dtype=str),
             ordered_dataset_sha256=np.asarray("a" * 64),
             validation_fold_ids=np.arange(n, dtype=np.int64) % 5,
+            row_ids=np.asarray([str(i) for i in range(n)]),
+            fold_ids=np.arange(n) % 5, dataset_fingerprint="fixture",
+            config=json.dumps({"name": name}),
         )
         fold_scores = [0.3, 0.32, 0.28, 0.31, 0.29]
         payload = {

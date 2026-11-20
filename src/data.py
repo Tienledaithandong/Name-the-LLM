@@ -127,16 +127,12 @@ def class_order() -> tuple[str, ...]:
 
 
 def dataset_fingerprint(df: pd.DataFrame) -> str:
-    """Stable sha256 over ids, prompt groups and labels (not text bytes)."""
-    parts = (
-        df["id"].astype(str)
-        + "|"
-        + df["prompt_id"].astype(str)
-        + "|"
-        + df["model"].astype(str)
-    )
-    digest = hashlib.sha256("\n".join(sorted(parts)).encode("utf-8")).hexdigest()
-    return digest[:16]
+    """Order-sensitive sha256 over the training rows, including text."""
+    # Include order and text: positional splits and fitted artifacts depend on both.
+    columns = ["id", "prompt_id", "model", "text"]
+    payload = df.loc[:, columns].astype(str).to_json(orient="values", force_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 
 def ordered_dataset_fingerprint(df: pd.DataFrame) -> str:

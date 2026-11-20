@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from src.audit import run_audit
-from src.config import load_config
+from src.config import load_config, resolved_models
 from src.constants import (
     ARTIFACTS_DIR,
     DATA_DIR,
@@ -87,21 +87,31 @@ def _split_path(label: str, explicit: str | None) -> Path:
     return Path(explicit) if explicit else ARTIFACTS_DIR / "splits" / f"splits_{label}.json"
 
 
-def ensure_splits(train_df, args, label: str):
+def ensure_splits(train_df, args, label: str, cfg=None):
     path = _split_path(label, getattr(args, "splits", None))
-    seed = int(getattr(args, "seed", RANDOM_STATE))
+    cfg = cfg or {}
+    seed = int(getattr(args, "seed", None) if getattr(args, "seed", None) is not None else cfg.get("seed", RANDOM_STATE))
     if path.is_file():
         folds, payload = load_splits(path, train_df)
+        expected_n = int(getattr(args, "n_splits", None) or cfg.get("cv", {}).get("n_splits", 5))
+        if payload["seed"] != seed or payload["n_splits"] != expected_n:
+            raise ValueError("saved splits do not match requested seed or fold count; regenerate splits")
+        if payload.get("shuffle") != cfg.get("cv", {}).get("shuffle", True):
+            raise ValueError("saved splits do not match requested shuffle; regenerate splits")
+        requested_method = cfg.get("cv", {}).get("method", "auto")
+        if requested_method != "auto" and payload["method"] != requested_method:
+            raise ValueError("saved splits do not match requested method; regenerate splits")
         split_id = f"{payload['method']}-s{payload['seed']}-n{payload['n_splits']}"
         print(f"[splits] loaded {path} ({split_id})")
     else:
         folds, method = make_splits(
             train_df,
-            n_splits=int(getattr(args, "n_splits", 5)),
+            n_splits=int(getattr(args, "n_splits", None) or cfg.get("cv", {}).get("n_splits", 5)),
             seed=seed,
-            method="auto",
+            method=cfg.get("cv", {}).get("method", "auto"),
+            shuffle=cfg.get("cv", {}).get("shuffle", True),
         )
-        save_splits(path, train_df, folds, method, seed)
+        save_splits(path, train_df, folds, method, seed, shuffle=cfg.get("cv", {}).get("shuffle", True))
         split_id = f"{method}-s{seed}-n{len(folds)}"
         print(f"[splits] created {path} ({split_id})")
     return folds, split_id
@@ -123,10 +133,10 @@ def cmd_audit(args) -> int:
 def cmd_splits(args) -> int:
     train, _test, _truth, label = load_data(args.data_dir, args.synthetic)
     folds, method = make_splits(
-        train, n_splits=args.n_splits, seed=args.seed, method=args.method
+        train, n_splits=args.n_splits, seed=args.seed if args.seed is not None else RANDOM_STATE, method=args.method
     )
     path = _split_path(label, args.out)
-    save_splits(path, train, folds, method, args.seed)
+    save_splits(path, train, folds, method, args.seed if args.seed is not None else RANDOM_STATE)
     for row in fold_groups(train, folds):
         print(
             f"[fold {row['fold']}] train {row['train_rows']} rows/"
@@ -140,15 +150,15 @@ def cmd_splits(args) -> int:
 def cmd_train(args) -> int:
     cfg = load_config(args.config)
     train, _test, _truth, label = load_data(args.data_dir, args.synthetic)
-    folds, split_id = ensure_splits(train, args, label)
+    folds, split_id = ensure_splits(train, args, label, cfg)
     out_dir = Path(args.out) if args.out else ARTIFACTS_DIR / "cv" / label
     registry = None if args.no_registry else Path(args.registry)
     results = run_cv(
         train,
         folds,
-        cfg["models"],
+        resolved_models(cfg),
         out_dir,
-        seed=int(args.seed),
+        seed=int(args.seed if args.seed is not None else cfg["seed"]),
         dataset_label=label,
         registry_path=registry,
         split_id=split_id,
@@ -183,6 +193,7 @@ def cmd_ensemble(args) -> int:
         out_path=candidate_path,
         max_models=max_models,
         members=members,
+        min_gain=min_gain,
     )
     result["min_gain"] = min_gain
     result["meets_min_gain_on_selection_oof"] = result["gain_over_best_single"] >= min_gain
@@ -343,7 +354,9 @@ def cmd_predict(args) -> int:
             if not set(pool_models) <= known:
                 raise ValueError(f"--pool-models not in config: {sorted(set(pool_models) - known)}")
         manifest = fit_final(
-            cfg["models"], train, final_dir, seed=int(args.seed), dataset_label=label,
+            resolved_models(cfg), train, final_dir,
+            seed=int(args.seed if args.seed is not None else cfg["seed"]),
+            dataset_label=label,
             pool_df=pool_df, pool_models=pool_models,
             cos_threshold=float(getattr(args, "cos_threshold", 0.3)),
             pool_cap=int(getattr(args, "pool_cap", 12000)),
@@ -352,6 +365,13 @@ def cmd_predict(args) -> int:
         print(f"[predict] refit on {len(train)} rows{tag} -> {manifest}")
     else:
         print(f"[predict] using existing artifacts in {final_dir}")
+
+    bundles, manifest = load_final(final_dir)
+    from src.inference import (
+        load_weights,
+        validate_artifact_provenance,
+        validate_weight_provenance,
+    )
 
     weights_path = Path(args.weights) if args.weights else None
     # A custom fitted-model directory may describe a different experiment. Do
@@ -366,17 +386,21 @@ def cmd_predict(args) -> int:
     elif weights_path is None:
         if not args.synthetic:
             raise FileNotFoundError("official prediction requires an explicit validated weights file")
+        if len(bundles) > 1 and not args.allow_equal_weights:
+            raise ValueError("no verified weights; supply --weights or explicitly use --allow-equal-weights")
         print("[predict] no ensemble weights; averaging synthetic models equally")
 
-    bundles, manifest = load_final(final_dir)
     weights = None
     if weights_path is not None:
-        from src.inference import load_weights
-
-        weights = load_weights(weights_path)
-        missing = sorted(set(weights) - set(bundles))
+        declared = load_weights(weights_path)
+        missing = sorted(set(declared) - set(bundles))
         if missing:
             raise ValueError(f"weights reference models absent from {final_dir}: {missing}")
+        weights = validate_weight_provenance(weights_path, manifest, bundles)
+
+    validate_artifact_provenance(
+        manifest, train, resolved_models(cfg), int(args.seed if args.seed is not None else cfg["seed"])
+    )
 
     if args.crossed:
         from src.features_embedding import FrozenEncoder
@@ -498,7 +522,12 @@ def cmd_package(args) -> int:
     if not (final_dir / "manifest.json").is_file():
         raise FileNotFoundError(f"{final_dir} has no manifest; run predict --fit first")
     out = Path(args.out) if args.out else ARTIFACTS_DIR / "kaggle_dataset"
+    final_resolved, out_resolved = final_dir.resolve(), out.resolve()
+    if out_resolved == final_resolved or out_resolved in final_resolved.parents or final_resolved in out_resolved.parents:
+        raise ValueError("package output and final artifacts must not overlap")
     if out.exists():
+        if not getattr(args, "overwrite", False):
+            raise FileExistsError(f"{out} exists; use --overwrite to replace it")
         shutil.rmtree(out)
     shutil.copytree(final_dir, out)
 
@@ -584,7 +613,7 @@ def cmd_stability(args) -> int:
     registry = None if args.no_registry else Path(args.registry)
     summary = run_stability(
         train,
-        cfg["models"],
+        resolved_models(cfg),
         weights,
         seeds=[int(s) for s in args.seeds],
         out_root=out_root,
@@ -607,6 +636,41 @@ def cmd_stability(args) -> int:
     print(f"[stability] report: {out_root / 'stability.md'}")
     return 0
 
+
+
+def cmd_reserve_holdout(args) -> int:
+    """Create selection and reserved prompt partitions before any model selection."""
+    from src.validation import make_holdout
+    train, _, _, _ = load_data(args.data_dir, args.synthetic)
+    selection, holdout = make_holdout(train, n_groups=args.holdout_groups, seed=args.seed)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for name, indices in (("selection.csv", selection), ("holdout.csv", holdout)):
+        path = out / name
+        if path.exists():
+            raise FileExistsError(f"{path} already exists; choose a fresh output directory")
+    train.iloc[selection].to_csv(out / "selection.csv", index=False)
+    train.iloc[holdout].to_csv(out / "holdout.csv", index=False)
+    print(f"[holdout] reserved {len(holdout)} rows; keep holdout.csv out of selection")
+    return 0
+
+
+def cmd_score_reserved(args) -> int:
+    """Score a previously reserved holdout with selection-only model artifacts."""
+    from src.inference import validate_artifact_provenance, validate_weight_provenance
+    from src.validation import LeakageError
+    cfg = load_config(args.config)
+    selection = validate_train_frame(pd.read_csv(args.selection))
+    holdout = validate_train_frame(pd.read_csv(args.holdout))
+    if set(selection["prompt_id"]) & set(holdout["prompt_id"]) or set(selection["id"]) & set(holdout["id"]):
+        raise LeakageError("selection and reserved holdout overlap")
+    bundles, manifest = load_final(args.final_dir)
+    validate_artifact_provenance(manifest, selection, resolved_models(cfg), args.seed if args.seed is not None else cfg["seed"])
+    weights = validate_weight_provenance(args.weights, manifest, bundles)
+    predictions = predict_dataframe(bundles, holdout, weights)
+    result = evaluate(holdout["model"].tolist(), predictions, model="reserved_holdout")
+    print(json.dumps(result, indent=2))
+    return 0
 
 def cmd_figures(args) -> int:
     """Render the Section-9 report figures from saved CV artifacts."""
@@ -650,7 +714,7 @@ def cmd_demo(args) -> int:
     results = run_cv(
         train,
         folds,
-        cfg["models"],
+        resolved_models(cfg),
         ARTIFACTS_DIR / "demo" / "cv",
         seed=args.seed,
         dataset_label=label,
@@ -662,7 +726,7 @@ def cmd_demo(args) -> int:
 
     run_ensemble(ARTIFACTS_DIR / "demo" / "cv", max_models=3)
 
-    fit_final(cfg["models"], train, ARTIFACTS_DIR / "demo" / "final",
+    fit_final(resolved_models(cfg), train, ARTIFACTS_DIR / "demo" / "final",
               seed=args.seed, dataset_label=label)
     bundles, _manifest = load_final(ARTIFACTS_DIR / "demo" / "final")
     from src.inference import load_weights
@@ -694,7 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_common(p, config: bool = True):
         p.add_argument("--data-dir", default=None, help="folder containing train.csv/test.csv")
         p.add_argument("--synthetic", action="store_true", help="use the synthetic fixture")
-        p.add_argument("--seed", type=int, default=RANDOM_STATE)
+        p.add_argument("--seed", type=int, default=None)
         if config:
             p.add_argument("--config", default="configs/baseline.yaml")
 
@@ -714,7 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_train)
     p_train.add_argument("--out", default=None)
     p_train.add_argument("--splits", default=None)
-    p_train.add_argument("--n-splits", type=int, default=5)
+    p_train.add_argument("--n-splits", type=int, default=None)
     p_train.add_argument("--registry", default=str(DEFAULT_REGISTRY))
     p_train.add_argument("--no-registry", action="store_true")
     p_train.add_argument("--save-fold-models", action="store_true")
@@ -722,6 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ens = sub.add_parser("ensemble", help="greedy blend over saved OOF scores")
     add_common(p_ens)
+    p_ens.set_defaults(config="configs/ensemble.yaml")
     p_ens.add_argument("--artifacts", default=None)
     p_ens.add_argument("--dataset", default="official", choices=["official", "synthetic"])
     p_ens.add_argument("--out", default=None)
@@ -743,6 +808,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--final-dir", default=None)
     p_pred.add_argument("--weights", default=None)
     p_pred.add_argument("--artifacts", default=None)
+    p_pred.add_argument("--allow-equal-weights", action="store_true", help="explicitly allow unvalidated equal weighting")
     p_pred.add_argument("--fit", action="store_true", help="force a refit on all train rows")
     p_pred.add_argument("--out", default=None)
     p_pred.add_argument(
@@ -782,6 +848,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_pkg = sub.add_parser("package", help="build an upload-ready Kaggle dataset folder")
     p_pkg.add_argument("--final-dir", default=None)
+    p_pkg.add_argument("--overwrite", action="store_true", help="replace an existing output directory")
     p_pkg.add_argument("--dataset", default="official", choices=["official", "synthetic"])
     p_pkg.add_argument("--out", default=None)
     p_pkg.add_argument("--kaggle-user", default="your-kaggle-username")
@@ -806,6 +873,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_stab.add_argument("--holdout-seed", type=int, default=7)
     p_stab.add_argument("--holdout-groups", type=int, default=25)
     p_stab.set_defaults(func=cmd_stability)
+
+    p_reserve = sub.add_parser("reserve-holdout", help="reserve prompts before model selection")
+    p_reserve.add_argument("--data-dir", default=None)
+    p_reserve.add_argument("--synthetic", action="store_true")
+    p_reserve.add_argument("--seed", type=int, default=7)
+    p_reserve.add_argument("--holdout-groups", type=int, default=25)
+    p_reserve.add_argument("--out", required=True, help="private directory for selection.csv and holdout.csv")
+    p_reserve.set_defaults(func=cmd_reserve_holdout)
+
+    p_score = sub.add_parser("score-reserved", help="evaluate selection-only artifacts on reserved prompts")
+    p_score.add_argument("--selection", required=True)
+    p_score.add_argument("--holdout", required=True)
+    p_score.add_argument("--final-dir", required=True)
+    p_score.add_argument("--weights", required=True)
+    p_score.add_argument("--config", default="configs/submission.yaml")
+    p_score.add_argument("--seed", type=int, default=None)
+    p_score.set_defaults(func=cmd_score_reserved)
 
     p_fig = sub.add_parser("figures", help="render report figures from saved CV artifacts")
     p_fig.add_argument("--artifacts", default=None)

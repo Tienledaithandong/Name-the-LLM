@@ -2337,3 +2337,76 @@ arXiv:2610.28434 (multi-resolution fingerprints survive distillation),
 arXiv:2610.19583 (ATLAS source-conditioned likelihood), and the
 Multi-Layer LoRA Readouts / WSDM-LMSYS recipes. It is the design-only
 implementation stage; scores are not claimed.
+
+## D060 — The D059 D010/SVD gain does not survive honest nested selection (2026-11-20)
+
+D059 screened `(svd, k)` for the D010 cell and read the best cell off the
+reporting OOF: `char` TF-IDF -> `svd128` -> project out `k=8` -> balanced logreg,
+blended as equal thirds with `char_tfidf_logreg` and `style_only`, scored
+0.385598 against the adopted 0.375971 (+0.0096). That number is selection on the
+validation rows, so it was never adoptable. This ADR is the pre-declared gate.
+
+### Protocol (fixed before the run)
+- Outer folds: the frozen prompt-grouped split files
+  `artifacts/splits/splits_official_verified_s42.json` and `..._s13.json`
+  (2699 rows / 150 prompts, `stratified_group` n=5).
+- Inner selection, per outer fold: `StratifiedGroupKFold` (fallback `GroupKFold`)
+  with 3 folds and seed 71 built from **outer-train rows only**; inner folds are
+  asserted prompt-disjoint.
+- Grid: `svd ∈ {64, 128, 256} × k ∈ {2, 4, 8, 16}` — the D059 grid, unchanged.
+- Selection metric: the candidate's **own** pooled balanced accuracy on the inner
+  OOF. It cannot be the blended inner score: the adopted members' saved OOF for
+  an outer-train row comes from a model trained on the current outer holdout, so
+  blending on inner rows would leak the holdout into the choice.
+- Tie-break: smallest `svd`, then smallest `k` (content-blind).
+- Outer scoring: the selected cell is refit on all outer-train rows and the
+  pre-specified equal-thirds blend is scored **once** on the untouched holdout.
+  No weight and no cell is fitted to the holdout.
+- Guard: the adopted OOF must match both the label vector and the per-row fold
+  ids of the split file before any delta is reported.
+
+### Results (`experiments/nested_d010.py`, registry rows
+`20261120T024045-official-nested-d010-th-rds-s42` and
+`20261120T025202-official-nested-d010-th-rds-s13`)
+
+| seed | control (0.5 char + 0.5 style) | nested equal thirds | delta | paired prompt 95% CI |
+|---|---|---|---|---|
+| 42 | 0.375971 | 0.364874 | **-0.011096** | [-0.0230, +0.0008] |
+| 13 | 0.358190 | 0.360410 | +0.002220 | [-0.0096, +0.0137] |
+
+- s42 fold deltas: +0.0038, -0.0093, -0.0278, -0.0241, +0.0019
+  (paired fold mean -0.0111, t-CI [-0.0291, +0.0069]).
+- s13 fold deltas: -0.0019, -0.0037, +0.0056, +0.0019, +0.0093
+  (mean +0.0022, t-CI [-0.0044, +0.0088]).
+- Candidate alone pooled: 0.272289 (s42), 0.258556 (s13).
+- Selected cells: s42 = svd256_k4 x2, svd256_k16, svd256_k2, svd128_k16;
+  s13 = svd256_k2 x2, svd256_k4, svd128_k2, svd128_k16. `svd64` was never
+  selected and `svd128_k8` — the D059 winner — was never selected either.
+- Wall time: 614.05 s (s42) + 677.74 s (s13).
+- Reproducibility check: a one-cell pre-run (`--svd-widths 128 --ks 2`) rebuilt
+  the D059 `svd128_k2` blend at 0.384116, bit-identical to the sweep, which
+  confirms the fold alignment and blend path before the full grid was spent.
+
+### Decision
+**Not adopted; the D010 cell is closed as a blend member.** The point estimate
+is *negative* on the seed where the screen looked positive, the two seeds
+disagree in sign, and every interval includes zero. The D059 +0.0096 was the
+selection effect the screen was warned about, not a property of the cell.
+
+Secondary observation (10 folds, descriptive only): inner selection prefers
+`svd256` in 7/10 folds, while D059 measured `svd256` blends at 0.3619-0.3656
+(negative). Candidate single-view accuracy is therefore a poor proxy for
+blend contribution here — a third member's value is its decorrelation from the
+two adopted members, which no single-view score measures. Any future third-member
+search should select on a blend-aware, holdout-safe criterion or be screened
+purely descriptively and never adopted on a maximised OOF.
+
+### Reviewer checks
+- [x] `python -m pytest -q` — 98 passed (full suite; `tests/test_nested_d010.py`
+      adds 5: best-inner selection, deterministic tie-break, prompt-disjoint
+      inner folds, full outer coverage, and holdout-label invariance of a fold's
+      own selection).
+- [x] `python -m experiments.nested_d010 --seeds 42 13 --out-dir artifacts/residual`
+      writes `artifacts/residual/nested_d010_s{42,13}.json` (not committed).
+- [ ] Nothing is submitted: the adopted blend, its OOF and the submission path
+      are unchanged.

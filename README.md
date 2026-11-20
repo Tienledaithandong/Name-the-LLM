@@ -175,6 +175,13 @@ withdrawn D016 crossed pipeline cannot be submitted by accident; `make package-c
 remains only as a historical research artifact. Owner-only account steps (rules, upload,
 submit, final selection) are listed in `docs/submission_checklist.md`.
 
+## GPU contrastive research experiment
+
+`kaggle/contrastive_gpu.ipynb` prepares an offline, prompt-grouped GPU
+comparison of classification and prompt-aware contrastive learning. It is a
+research experiment, not a submission notebook. Setup, data handling and its
+validation limitations are in `docs/contrastive_gpu.md`.
+
 ## Results
 
 ### Official training data (2026-11-14)

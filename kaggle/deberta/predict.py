@@ -39,7 +39,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 
 # Force offline providers on import: the competition is internet-disabled and
 # there must be no runtime downloads (Code Requirements).
@@ -317,6 +316,8 @@ def main(argv=None) -> int:
     if args.mode == "blend" and not args.sparse_dir:
         raise SubmissionError("--sparse-dir is required for blend mode")
     bundles = load_sparse_bundles(Path(args.sparse_dir)) if args.mode == "blend" else None
+
+    import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cpu":

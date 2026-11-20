@@ -2464,3 +2464,12 @@ Reopen if: a regenerated split's fold assignments differ from the registered
 ones (then the split ID must change and every affected score is invalidated), or
 a legacy artifact turns out to be needed for a published number (regenerate it
 from its config; do not relax the check).
+
+## D063 — Prompt-aware contrastive GPU research (planned)
+
+Prepare a separate, offline Kaggle GPU experiment comparing classification,
+standard supervised contrastive learning and same-prompt weighted hard negatives
+on identical prompt-grouped development folds. Reserve prompt groups before this
+new run but do not claim they are pristine: prior experiments used the full
+training set. The experiment is research-only, records no official score and
+does not replace the submission pipeline. See `docs/contrastive_gpu.md`.

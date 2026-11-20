@@ -47,8 +47,9 @@ def test_find_parent_returns_abspath_when_absolute(tmp_path):
 
 
 def test_find_test_dir_lives_in_repo_data(tmp_path, test_df):
-    # synthetic fixture ships test.csv under data/synthetic (generated on demand)
-    tdir = find_test_dir("data/synthetic")
+    # The test fixture is in memory; write it into an isolated temporary folder.
+    test_df.to_csv(tmp_path / "test.csv", index=False)
+    tdir = find_test_dir(str(tmp_path))
     assert (tdir / "test.csv").is_file()
 
 

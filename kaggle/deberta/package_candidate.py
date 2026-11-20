@@ -56,11 +56,11 @@ def _safe_file(root: Path, rel: str) -> Path:
 
 def validate_model_weights(model_dir: Path) -> None:
     """Check a non-pickle large-model checkpoint and its classifier shape."""
-    from safetensors import safe_open
-
     weights = _safe_file(model_dir, "model.safetensors")
     if weights.stat().st_size < MIN_MODEL_SIZE_BYTES:
         raise ValueError("weight file is too small to be the evaluated large model; dummy weights are refused")
+    from safetensors import safe_open
+
     try:
         with safe_open(str(weights), framework="np") as checkpoint:
             names = set(checkpoint.keys())

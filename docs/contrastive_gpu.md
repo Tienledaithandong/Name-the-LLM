@@ -88,3 +88,31 @@ until the owner runs the notebook.
   Texts*: fine-tuned and contrastive attribution under multilingual shift.
   Its benchmark is not directly comparable to this 18-class competition.
   <https://arxiv.org/abs/2508.01656>
+
+## Optional full-passage study: random windows + head/tail evaluation
+
+The default classifier sees only the first 256 tokens (including special
+tokens). That can discard the ending of a long passage. No official-data
+truncation rate has been measured in this checkout; measure it rather than
+assuming it is large. `configs/contrastive_multicrop_gpu.yaml` compares:
+
+- `classification` and `hard_negative`: the existing head-only controls;
+- `hard_negative_multicrop`: identical hard-negative training budget and sampler,
+  but with a seeded random contiguous content window for each training example.
+  At evaluation, it averages logits from deterministic head and tail windows of
+  **that same passage**. Special tokens are added after cropping. No prompt
+  grouping, hidden-test labels or transductive signal are used.
+
+In the notebook change `CONFIG` to
+`REPO_DIR / 'configs/contrastive_multicrop_gpu.yaml'` before running. This
+variant requires two encoder passes at evaluation; GPU memory and runtime have
+not been measured. `length_diagnostics.json` records the number of selection
+rows exceeding the token budget and grouped-CV metrics for truncated vs fitting
+subsets. These slices can lack class support and are descriptive, not an unbiased
+selection gate. `paired_bootstrap.json` also includes the paired prompt-level
+difference against the hard-negative head-only model. The contrast changes both
+training crops and inference pooling; it tests the **combined recipe**, not
+which individual component caused any change. A favorable result is not evidence
+of a leaderboard gain; still require nested grouped validation or truly new
+prompts before promotion. No code or model weights from another repository were
+copied into this implementation.

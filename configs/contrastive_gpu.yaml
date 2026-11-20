@@ -1,0 +1,15 @@
+# Offline grouped-CV research experiment; not a submission configuration.
+seed: 42
+holdout_seed: 7
+holdout_groups: 25
+n_splits: 5
+authors_per_batch: 8
+steps_per_epoch: 80
+epochs: 3
+max_length: 256
+learning_rate: 0.00002
+weight_decay: 0.01
+contrastive_weight: 0.2
+temperature: 0.1
+hard_negative_weight: 3.0
+variants: [classification, contrastive, hard_negative]

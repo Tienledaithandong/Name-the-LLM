@@ -301,3 +301,12 @@ and alternate-seed checks use fixed weights. The former secondary holdout was
 not independent of selection; its numbers remain historical exploratory results.
 Future independent evaluations reserve prompt groups before selection as
 specified in `docs/experiment_protocol.md`. No new official score is claimed.
+
+## D018 — Prompt-aware contrastive GPU research (planned)
+
+Prepare a separate, offline Kaggle GPU experiment comparing classification,
+standard supervised contrastive learning and same-prompt weighted hard negatives
+on identical prompt-grouped development folds. Reserve prompt groups before this
+new run but do not claim they are pristine: prior experiments used the full
+training set. The experiment is research-only, records no official score and
+does not replace the submission pipeline. See `docs/contrastive_gpu.md`.

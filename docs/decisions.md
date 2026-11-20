@@ -2354,3 +2354,113 @@ specified in `docs/experiment_protocol.md`. No new official score is claimed.
 
 Reopen if: a caller needs the older lenient behaviour for legacy artifacts, in
 which case regenerate the artifacts rather than relaxing the checks.
+
+## D062 — Merge resolutions: metric fix, ordered fingerprints, dual OOF provenance, neutral absent classes (2026-11-20)
+
+The merge of `origin/master` (`d3547e3`, "Harden validation, artifacts, and
+submission workflow") into local `master` was resolved by hand in 14 files. Four
+of those resolutions change behaviour in ways a reader must be able to audit, so
+they are recorded here. The merge commit is `48dd42a`; the incoming ADR was
+renumbered to D061. No new official score is claimed, and no protocol
+measurement changes: every number in the registry was produced on unchanged
+prompt-grouped folds.
+
+### 1. Metric: `macro_f1` no longer skips supported-but-unpredicted classes
+`macro_f1` is diagnostic only (the competition metric is balanced accuracy),
+but the two branches computed it differently. The merge keeps the hardened
+definition: for every label with support, `F1 = 2*TP / (support + predicted)`,
+so a class that is present in truth but never predicted contributes `F1 = 0`
+instead of being dropped from the mean. The older form skipped such classes,
+which inflated macro F1 exactly in the failure mode the diagnostic is meant to
+expose (a member that never emits one of the 18 labels). A shape check was also
+added, matching `per_class_recall`. `balanced_accuracy` is deliberately
+unchanged: it averages recall over classes with support and still *skips*
+unsupported ones, because a class absent from the truth set has no defined
+recall and scoring it as zero would move the competition metric. Consequence:
+macro F1 values in earlier summaries are not comparable with new ones; balanced
+accuracy values are.
+
+### 2. `dataset_fingerprint` is now order-sensitive and covers the text
+The merge keeps the hardened fingerprint: a sha256 over `id`, `prompt_id`,
+`model` and `text` in row order (full 64 hex characters). The older digest was
+a 16-character hash over the same columns *excluding* text, taken after
+sorting, so it could not detect row reordering or a text edit that left ids
+intact — yet folds are stored as positional indices and fitted artifacts depend
+on both order and text. `ordered_dataset_fingerprint` (a row-wise digest of the
+same fields) is retained alongside it; `save_splits` writes both, and
+`load_splits` verifies the ordered digest first, then the plain one, then
+re-runs `validate_splits` so a *changed* split file still cannot smuggle prompt
+overlap past the fingerprints.
+
+Consequence, and the reason for the regeneration below: every split file and
+OOF matrix written before this change fails the new checks. `load_splits`
+refuses them rather than trusting unverifiable positional indices; `load_oof`
+refuses an OOF `.npz` that carries no provenance at all. Legacy artifacts are
+regenerated, never accepted leniently.
+
+### 3. OOF provenance: both families are written, either is accepted
+The two branches had each invented a provenance scheme. Round-tripping either
+one alone would have silently broken the other's consumers (the adopted-blend
+runs on one side, the review regression tests and `figures` on the other), so
+the resolution is a superset:
+
+- `run_cv` writes `labels` (as `str`), `ordered_dataset_sha256`,
+  `validation_fold_ids`, `row_ids`, `fold_ids`, `dataset_fingerprint` and the
+  member `config`.
+- `load_oof` accepts an `.npz` that has either the
+  `ordered_dataset_sha256` / `validation_fold_ids` pair or the
+  `dataset_fingerprint` / `fold_ids` pair (plus `row_ids` and `config` when
+  present), and returns *both* key families so either consumer works. It still
+  rejects a file with neither, a wrong 18-label order, non-finite scores,
+  duplicate `row_ids`, or a `row_ids`/score length mismatch.
+- Cross-member alignment compares every provenance key present on both sides
+  (`ordered_dataset_sha256`, `validation_fold_ids`, `dataset_fingerprint`,
+  `fold_ids`, `row_ids`, `y`) and fails with
+  `OOF provenance mismatch: <key> is not aligned with <first member>`.
+- `greedy_blend` keeps the stricter requirement: a 64-hex
+  `ordered_dataset_sha256` and fold ids must exist before selection runs, since
+  greedy selection without fold identity is how a blend silently becomes
+  unverifiable.
+- `predict --fit` validates the weights/final-artifact provenance in the order
+  weights-first (explicit "weights reference models absent" check, then
+  `validate_weight_provenance`, then `validate_artifact_provenance`).
+
+This is a superset, not a loosening: no check was removed, and a new writer
+produces everything both sides need. Reopen only if a consumer turns out to
+need a third scheme; the fix then is to write it from `run_cv`, not to relax
+`load_oof`.
+
+### 4. Absent classes take the neutral value in `normalize_scores`
+When a member cannot score a class (absent from that member's training side, or
+padded with the sentinel), `normalize_scores` now leaves the entry at the
+neutral row-z value `0.0` after masking the sentinel out of the row mean and
+standard deviation. The alternative resolution — mapping absent entries to a
+large negative value so the member vetoes the class outright — was considered
+and not adopted: a veto lets one member's missing class override another
+member that did score it, which is a silent loss of information in a blend
+whose whole purpose is complementarity (`test_missing_class_in_one_member_does_not_veto_another_member`).
+Neutral 0.0 is also what the existing blend tests and the D037/D039 weight
+reports assume, so keeping it avoids re-scoring every adopted number. The
+trade-off is explicit: a member that is systematically blind to a class no
+longer suppresses it. If a future member is found to hallucinate an unseen
+class, the veto is a one-line reversible change to `normalize_scores` plus the
+two tests that encode the neutral convention and a new ADR.
+
+### Regeneration required by these resolutions
+The following local artifacts predate the hardened fingerprint and carry no
+usable provenance, so they are regenerated on the unchanged folds rather than
+reused: `artifacts/splits/splits_official.json` (and the synthetic split),
+`artifacts/cv/official/oof/*.npz` for every model a current config still
+defines, and the synthetic CV run. Legacy OOF matrices whose producers are no
+longer in the tree or need optional dependencies/GPU (MiniLM embeddings,
+CatBoost, the Kaggle-side DeBERTa runs, the secondary-holdout stability runs)
+are quarantined rather than silently mixed into a provenance-checked directory;
+their registered numbers stay as historical records and are not re-reported.
+Regenerating a split must leave the fold *assignments* identical — the seed and
+`stratified_group-s42-n5` method are unchanged — otherwise the comparison to the
+adopted 0.375971 blend would no longer be like-for-like.
+
+Reopen if: a regenerated split's fold assignments differ from the registered
+ones (then the split ID must change and every affected score is invalidated), or
+a legacy artifact turns out to be needed for a published number (regenerate it
+from its config; do not relax the check).

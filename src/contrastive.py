@@ -112,3 +112,26 @@ def paired_prompt_bootstrap(labels, groups, baseline_predictions, candidate_pred
             'mean_difference': float(np.mean(samples)),
             'lower_95': float(np.quantile(samples, 0.025)),
             'upper_95': float(np.quantile(samples, 0.975))}
+
+
+def crop_token_ids(token_ids, content_limit: int, mode: str, rng=None) -> list[int]:
+    """Select a contiguous content-token window, excluding special tokens.
+
+    Random windows are for training only; deterministic head and tail windows
+    can be averaged at inference without accessing prompt labels or other rows.
+    """
+    if content_limit < 1:
+        raise ValueError("content_limit must be positive")
+    if mode not in {"head", "tail", "random"}:
+        raise ValueError(f"unknown crop mode: {mode}")
+    ids = list(token_ids)
+    remaining = max(0, len(ids) - content_limit)
+    if mode == "tail":
+        start = remaining
+    elif mode == "random":
+        if rng is None:
+            raise ValueError("random crops require an explicit random generator")
+        start = int(rng.integers(remaining + 1))
+    else:
+        start = 0
+    return ids[start:start + content_limit]

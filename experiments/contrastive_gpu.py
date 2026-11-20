@@ -20,7 +20,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.constants import LABELS, N_CLASSES  # noqa: E402
-from src.contrastive import CrossedBatchSampler, paired_prompt_bootstrap, prompt_contrastive_loss  # noqa: E402
+from src.contrastive import (  # noqa: E402
+    CrossedBatchSampler, crop_token_ids, paired_prompt_bootstrap, prompt_contrastive_loss,
+)
 from src.data import dataset_fingerprint, labels_to_indices, validate_train_frame  # noqa: E402
 from src.metrics import evaluate  # noqa: E402
 from src.repro import env_snapshot, git_commit  # noqa: E402
@@ -70,6 +72,15 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
     texts = selection.text.tolist()
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint), local_files_only=True)
     encoded = tokenizer(texts, truncation=True, max_length=cfg['max_length'], padding=False)
+    use_crops = 'hard_negative_multicrop' in cfg['variants']
+    raw_ids = None
+    content_limit = None
+    if use_crops:
+        content_limit = cfg['max_length'] - tokenizer.num_special_tokens_to_add(pair=False)
+        if content_limit < 1:
+            raise ValueError('max_length must leave room for content after special tokens')
+        raw_ids = tokenizer(texts, add_special_tokens=False, truncation=False)['input_ids']
+        truncated = np.asarray([len(ids) > content_limit for ids in raw_ids], dtype=bool)
     output.mkdir(parents=True)
     (output / 'oof').mkdir()
     metadata = {'dataset_fingerprint': dataset_fingerprint(train),
@@ -98,13 +109,21 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
             pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
             return self.head(pooled), pooled
 
-    def tensor_batch(indices):
-        items = [{key: values[int(i)] for key, values in encoded.items()} for i in indices]
+    def tensor_batch(indices, crop_mode=None, rng=None):
+        if crop_mode is None:
+            items = [{key: values[int(i)] for key, values in encoded.items()} for i in indices]
+        else:
+            items = [tokenizer.prepare_for_model(
+                crop_token_ids(raw_ids[int(i)], content_limit, crop_mode, rng),
+                add_special_tokens=True, return_attention_mask=True,
+                return_token_type_ids='token_type_ids' in tokenizer.model_input_names,
+                truncation=False,
+            ) for i in indices]
         return {key: value.to(device) for key, value in tokenizer.pad(items, padding=True, return_tensors='pt').items()}
 
     summary = {}
     for variant in cfg['variants']:
-        if variant not in {'classification', 'contrastive', 'hard_negative'}:
+        if variant not in {'classification', 'contrastive', 'hard_negative', 'hard_negative_multicrop'}:
             raise ValueError(f'unknown variant {variant!r}')
         scores = np.empty((len(selection), N_CLASSES), dtype=np.float32)
         for fold, (tr, va) in enumerate(folds):
@@ -113,6 +132,7 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
             seed = int(cfg['seed']) + fold
             random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed) if device == 'cuda' else None
             sampler = CrossedBatchSampler(y[tr], groups[tr], cfg['authors_per_batch'], seed)
+            crop_rng = np.random.default_rng(seed + 10000)
             model = EncoderClassifier().to(device)
             optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg['learning_rate']), weight_decay=float(cfg['weight_decay']))
             model.train()
@@ -123,10 +143,11 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
                     target = torch.as_tensor(y[indices], device=device, dtype=torch.long)
                     prompts = torch.as_tensor(groups[indices], device=device, dtype=torch.long)
                     optimizer.zero_grad(set_to_none=True)
-                    logits, pooled = model(tensor_batch(indices))
+                    crop_mode = 'random' if variant == 'hard_negative_multicrop' else None
+                    logits, pooled = model(tensor_batch(indices, crop_mode, crop_rng))
                     loss = nn.functional.cross_entropy(logits, target)
                     if variant != 'classification':
-                        weight = cfg['hard_negative_weight'] if variant == 'hard_negative' else 1.0
+                        weight = cfg['hard_negative_weight'] if variant in {'hard_negative', 'hard_negative_multicrop'} else 1.0
                         loss = loss + cfg['contrastive_weight'] * prompt_contrastive_loss(pooled, target, prompts, cfg['temperature'], weight)
                     loss.backward()
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -137,7 +158,12 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
             with torch.no_grad():
                 for start in range(0, len(va), cfg['authors_per_batch'] * 2):
                     idx = va[start:start + cfg['authors_per_batch'] * 2]
-                    logits, _ = model(tensor_batch(idx))
+                    if variant == 'hard_negative_multicrop':
+                        head, _ = model(tensor_batch(idx, 'head'))
+                        tail, _ = model(tensor_batch(idx, 'tail'))
+                        logits = (head + tail) / 2
+                    else:
+                        logits, _ = model(tensor_batch(idx))
                     scores[idx] = logits.float().cpu().tolist()
             del model, optimizer
             if device == 'cuda':
@@ -150,6 +176,21 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
                             config=json.dumps({'name': variant, 'experiment': cfg, 'checkpoint_sha256': checkpoint_hash}, sort_keys=True))
         print(f'{variant}: pooled grouped-CV balanced accuracy={result["balanced_accuracy"]:.4f}', flush=True)
     (output / 'metrics.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    if use_crops:
+        # Descriptive post-hoc slices; unsupported classes are excluded by evaluate.
+        by_length = {'content_token_limit': content_limit,
+                     'would_truncate_rows': int(truncated.sum()),
+                     'selection_rows': len(selection), 'variants': {}}
+        for variant in cfg['variants']:
+            pred = np.load(output / 'oof' / f'{variant}.npz', allow_pickle=False)['scores'].argmax(axis=1)
+            slices = {}
+            for name, mask in (('fits_head', ~truncated), ('exceeds_head', truncated)):
+                if mask.any():
+                    truth = selection.model.to_numpy()[mask].tolist()
+                    predicted = [LABELS[i] for i in pred[mask]]
+                    slices[name] = evaluate(truth, predicted, model=variant)
+            by_length['variants'][variant] = slices
+        (output / 'length_diagnostics.json').write_text(json.dumps(by_length, indent=2), encoding='utf-8')
     if 'classification' in cfg['variants']:
         base = np.load(output / 'oof' / 'classification.npz', allow_pickle=False)['scores'].argmax(axis=1)
         comparisons = {}
@@ -158,6 +199,11 @@ def run(train, checkpoint, output, cfg, allow_cpu=False):
                 continue
             pred = np.load(output / 'oof' / f'{variant}.npz', allow_pickle=False)['scores'].argmax(axis=1)
             comparisons[variant] = paired_prompt_bootstrap(y, groups, base, pred, seed=cfg['seed'])
+        if 'hard_negative' in cfg['variants'] and 'hard_negative_multicrop' in cfg['variants']:
+            hard = np.load(output / 'oof' / 'hard_negative.npz', allow_pickle=False)['scores'].argmax(axis=1)
+            multi = np.load(output / 'oof' / 'hard_negative_multicrop.npz', allow_pickle=False)['scores'].argmax(axis=1)
+            comparisons['hard_negative_multicrop_vs_hard_negative'] = paired_prompt_bootstrap(
+                y, groups, hard, multi, seed=cfg['seed'])
         (output / 'paired_bootstrap.json').write_text(json.dumps(comparisons, indent=2), encoding='utf-8')
     print(f'Experiment completed: {output}. Reserved prompts were not scored.', flush=True)
 

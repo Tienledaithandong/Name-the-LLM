@@ -59,18 +59,24 @@ def test_tiny_offline_training_end_to_end(tmp_path):
     BertTokenizerFast(vocab_file=str(checkpoint / 'vocab.txt')).save_pretrained(checkpoint)
     BertModel(BertConfig(vocab_size=7, hidden_size=16, num_hidden_layers=1,
                          num_attention_heads=2, intermediate_size=32)).save_pretrained(checkpoint)
-    rows = [{'id': f'{g}-{i}', 'prompt_id': f'p{g}', 'text': 'sample text', 'model': label}
+    rows = [{'id': f'{g}-{i}', 'prompt_id': f'p{g}', 'text': 'sample text ' * 15, 'model': label}
             for g in range(5) for i, label in enumerate(LABELS)]
     cfg = dict(seed=42, holdout_seed=7, holdout_groups=1, n_splits=2,
                authors_per_batch=2, steps_per_epoch=1, epochs=1, max_length=16,
                learning_rate=2e-5, weight_decay=0.01, contrastive_weight=0.2,
                temperature=0.1, hard_negative_weight=3.0,
-               variants=['classification', 'contrastive', 'hard_negative'])
+               variants=['classification', 'contrastive', 'hard_negative', 'hard_negative_multicrop'])
     output = tmp_path / 'result'
     run(pd.DataFrame(rows), checkpoint, output, cfg, allow_cpu=True)
     oof = load_oof(output)
     assert set(oof) == set(cfg['variants'])
     assert all(x['scores'].shape == (72, len(LABELS)) for x in oof.values())
+    import json
+    comparison = json.loads((output / 'paired_bootstrap.json').read_text())
+    assert 'hard_negative_multicrop_vs_hard_negative' in comparison
+    lengths = json.loads((output / 'length_diagnostics.json').read_text())
+    assert lengths['would_truncate_rows'] == 72
+    assert lengths['content_token_limit'] == 14
     with pytest.raises(FileExistsError):
         run(pd.DataFrame(rows), checkpoint, output, cfg, allow_cpu=True)
 
@@ -84,3 +90,21 @@ def test_paired_bootstrap_resamples_prompts_and_is_reproducible():
     first = paired_prompt_bootstrap(y, groups, baseline, candidate, n_resamples=100, seed=9)
     assert first == paired_prompt_bootstrap(y, groups, baseline, candidate, n_resamples=100, seed=9)
     assert first['lower_95'] == first['upper_95'] == 1.0
+
+
+def test_content_crops_cover_tail_and_are_seeded():
+    from src.contrastive import crop_token_ids
+    tokens = list(range(11))
+    assert crop_token_ids(tokens, 4, 'head') == [0, 1, 2, 3]
+    assert crop_token_ids(tokens, 4, 'tail') == [7, 8, 9, 10]
+    assert crop_token_ids([1, 2], 4, 'tail') == [1, 2]
+    a, b = np.random.default_rng(17), np.random.default_rng(17)
+    samples = [crop_token_ids(tokens, 4, 'random', a) for _ in range(30)]
+    assert samples == [crop_token_ids(tokens, 4, 'random', b) for _ in range(30)]
+    assert len({tuple(x) for x in samples}) > 1
+    with pytest.raises(ValueError, match='random generator'):
+        crop_token_ids(tokens, 4, 'random')
+    with pytest.raises(ValueError, match='content_limit'):
+        crop_token_ids(tokens, 0, 'head')
+    with pytest.raises(ValueError, match='unknown crop'):
+        crop_token_ids(tokens, 4, 'invalid')

@@ -2473,3 +2473,13 @@ on identical prompt-grouped development folds. Reserve prompt groups before this
 new run but do not claim they are pristine: prior experiments used the full
 training set. The experiment is research-only, records no official score and
 does not replace the submission pipeline. See `docs/contrastive_gpu.md`.
+
+## D064 — Optional long-passage contrastive study (planned)
+
+The contrastive GPU probe previously used head truncation only. Add an opt-in,
+matched hard-negative variant using seeded random token windows in training and
+per-passage head/tail logit averaging at evaluation, with length diagnostics and
+paired prompt bootstrap. Existing defaults and the submission pipeline are
+unchanged. This is a combined-recipe hypothesis, not a competition result; no
+previously explored holdout is claimed to be independent. See
+`docs/research_landscape.md` and `docs/contrastive_gpu.md`.

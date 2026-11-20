@@ -1,0 +1,90 @@
+# SASCR — Sibling-Aware Source-Conditioned Readout.
+#
+# Design for the "innovative idea" the team chose from the superpowers
+# brainstorming skill: keep the already-verified pool-augmented trunk
+# (row-z 0.5 z(char+pool40k) + 0.5 z(style), CV 0.442675) and attack the
+# ~50%-within-lab version-sibling error ceiling with a frozen multi-depth
+# causal readout (Member B) plus a 4-way sibling residual head (Member C).
+#
+# This file is the *final blend / prediction* config. `models` holds the two
+# members the CV runner can actually fit; every new SASCR member goes in
+# `design` and is intentionally NOT loadable until its feature builder and
+# classifier are written, so an end-to-end run of unfinished members cannot
+# silently pass through the harness.
+#
+# Verified anchors this recipe reproduces (src/registry.csv):
+#   char official-only          0.319306 (char+pool 0.410445 at cap40k)
+#   style official-only         0.290398
+#   official-only blend 0.5/0.5  0.375971  (public LB 0.356)
+#   pool-MIX cap40k blend 0.5/0.5 0.442675  (D037/D039, candidate)
+#   row_z > softmax > rank_mean  (D042 blend-rule screen)
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+features:
+  max_features: 100000
+  min_df: 2
+  sublinear_tf: true
+
+blend:
+  # Adopted trunk (D037/D039 + D042): row-z, fixed equal weights, no in-sample greedy.
+  method: row_z
+  weights:
+    char_tfidf_logreg: 0.5
+    style_only: 0.5
+
+ensemble:
+  # Final blend config: exactly the loadable members of the adopted trunk.
+  method: fixed
+  members:
+    - char_tfidf_logreg
+    - style_only
+
+models:
+  - name: char_tfidf_logreg
+    features: [char]
+    classifier: logreg
+    C: 2.0
+    max_features: 100000
+  - name: style_only
+    features: []
+    style: true
+    classifier: logreg
+    C: 1.0
+
+design:
+  # SASCR member B: frozen multi-depth causal readout on a Qwen3-8B-base
+  # backbone. Feature builder (src/features_multilayer.py) is future work;
+  # keep out of `models` so the CV runner cannot train an unfinished member.
+  # SASCR member C: 4-way sibling residual head gated onto the hard
+  # intra-lab clusters. It consumes per-row the residual margin between
+  # member A (pool-mix trunk) and Member B; fitted per-fold on the official
+  # rows only, validated under the registered grouped folds before any
+  # submission.
+  members:
+    - name: multilayer_causal_readout
+      status: design
+      backend: qwen3-8b-base
+      depths: [2, 4, 6, 8, 12, 16, 20, 24]
+      pooling: content_token_mean
+      scale: layer_norm
+    - name: sibling_residual
+      status: design
+      clusters:
+        - glm-5.3
+        - glm-5.3-flash
+        - gpt-5.6-luna
+        - gpt-5.6-sol
+        - gpt-5.6-terra
+        - claude-fable-5
+        - claude-opus-4-6
+        - claude-opus-4-8
+        - claude-opus-5
+        - claude-sonnet-5
+        - gemini-3.7-flash
+        - gemini-3.8-flash
+      head: 4-way sibling softmax

@@ -1,0 +1,6 @@
+# Score improvement plan, step 2. All parameters are fixed before scoring.
+# Uses one char TF-IDF + style map and C=1 balanced logistic heads.
+seed: 42
+alpha: 0.2
+solver_basis: centered_training_row_span
+max_features: 100000

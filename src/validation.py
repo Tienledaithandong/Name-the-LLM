@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
-from src.data import dataset_fingerprint, labels_to_indices
+from src.data import dataset_fingerprint, labels_to_indices, ordered_dataset_fingerprint
 
 
 class LeakageError(RuntimeError):
@@ -145,7 +145,12 @@ def fold_groups(df: pd.DataFrame, folds) -> list[dict]:
 def make_holdout(
     df: pd.DataFrame, n_groups: int = 25, seed: int = 7
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Secondary prompt-held-out split, untouched by model selection."""
+    """Secondary prompt-held-out split for robustness checks, not for selection.
+
+    The default seed-7 holdout has been examined (D015-D017). The seed-2027
+    subset has not been scored separately, but its prompts participated in prior
+    full-OOF development and are not a fully untouched evaluation (D024).
+    """
     prompts = np.asarray(sorted(pd.unique(df["prompt_id"].astype(str))))
     if n_groups < 1:
         raise ValueError("holdout must contain at least one prompt")
@@ -171,6 +176,7 @@ def save_splits(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "dataset_fingerprint": dataset_fingerprint(df),
+        "ordered_dataset_sha256": ordered_dataset_fingerprint(df),
         "n_rows": int(len(df)),
         "n_prompts": int(df["prompt_id"].nunique()),
         "n_splits": len(folds),
@@ -193,14 +199,23 @@ def save_splits(
 def load_splits(
     path: str | Path, df: pd.DataFrame | None = None
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], dict]:
-    """Load persisted folds; verify the dataset fingerprint when ``df`` is given."""
+    """Load persisted folds only when they carry a verifiable ordered fingerprint."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(
             f"split file not found: {path}; run `python -m src.cli splits` first"
         )
     payload = json.loads(path.read_text(encoding="utf-8"))
+    ordered = payload.get("ordered_dataset_sha256")
+    if (not isinstance(ordered, str) or len(ordered) != 64 or
+            any(c not in "0123456789abcdef" for c in ordered)):
+        raise LeakageError(
+            "split ordered dataset fingerprint is missing or invalid; "
+            "regenerate splits rather than reusing unverifiable row indices"
+        )
     if df is not None:
+        if ordered != ordered_dataset_fingerprint(df):
+            raise LeakageError("split ordered dataset fingerprint does not match data")
         expected = payload.get("dataset_fingerprint")
         actual = dataset_fingerprint(df)
         if expected != actual:
@@ -216,5 +231,7 @@ def load_splits(
         for f in payload["folds"]
     ]
     if df is not None:
+        # Fingerprinting binds indices to rows but cannot prove that a changed
+        # split file keeps prompt groups separated or covers each row once.
         validate_splits(df, folds)
     return folds, payload

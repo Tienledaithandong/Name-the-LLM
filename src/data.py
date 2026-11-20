@@ -8,6 +8,7 @@ assumed: a mismatch raises instead of silently producing garbage features.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -132,6 +133,24 @@ def dataset_fingerprint(df: pd.DataFrame) -> str:
     payload = df.loc[:, columns].astype(str).to_json(orient="values", force_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+
+
+def ordered_dataset_fingerprint(df: pd.DataFrame) -> str:
+    """Hash ordered row identities and text without persisting the input rows.
+
+    Unlike :func:`dataset_fingerprint`, this digest changes when rows are
+    reordered or their text changes. It binds prediction arrays to the precise
+    input that produced them.
+    """
+    _require_columns(df, TRAIN_COLUMNS, "train frame")
+    _require_no_nulls(df, TRAIN_COLUMNS, "train frame")
+    digest = hashlib.sha256()
+    for row in df.loc[:, list(TRAIN_COLUMNS)].itertuples(index=False, name=None):
+        payload = json.dumps([str(value) for value in row], ensure_ascii=False,
+                             separators=(",", ":"))
+        digest.update(payload.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def group_counts(df: pd.DataFrame) -> pd.Series:

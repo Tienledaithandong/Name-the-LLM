@@ -1,0 +1,19 @@
+# Conditional Step 4: no supervised backbone updates and no external training rows.
+encoder:
+  repo_id: answerdotai/ModernBERT-large
+  model_revision: 45bb4654a4d5aaff24dd11d4781fa46d39bf8c13
+  tokenizer_revision: 45bb4654a4d5aaff24dd11d4781fa46d39bf8c13
+  max_length: 384
+  batch_size: 4
+  embedding_dim: 1024
+  device: cuda
+  dtype: float16
+  attention_implementation: sdpa
+
+probe:
+  pilot_folds: [0, 1]
+  pilot_max_seconds: 2700
+  full_max_seconds: 7200
+  pilot_min_gain: 0.010
+  blend_weight: 0.25
+  classifier_c: 1.0

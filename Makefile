@@ -2,7 +2,7 @@ PYTHON ?= python
 DATA ?= data
 CONFIG ?= configs/baseline.yaml
 
-.PHONY: help install test demo audit splits baseline features embeddings frozen-encoder ensemble figures stability predict package predict-crossed package-crossed clean
+.PHONY: help install test demo audit splits baseline features embeddings frozen-encoder ensemble evaluate figures stability stress predict package predict-crossed package-crossed clean
 
 help:
 	@echo "make install     install runtime dependencies"
@@ -14,13 +14,15 @@ help:
 	@echo "make features    cross-validate the stylometry ablations"
 	@echo "make embeddings  cross-validate dense/nuisance variants"
 	@echo "make frozen-encoder  H3 benchmark (needs optional sentence-transformers)"
-	@echo "make ensemble    greedy blend from saved OOF scores"
+	@echo "make ensemble    write exploratory candidate from identity-checked OOF"
+	@echo "make evaluate    score saved identity-verified OOF (no fitting, no test rows)"
 	@echo "make figures     render report figures from saved CV artifacts"
 	@echo "make stability   blend robustness: alternative seeds + secondary holdout"
+	@echo "make stress      retired: transductive score reporting prohibited by D024"
 	@echo "make predict     refit on all data and write submission.parquet"
 	@echo "make package     build an upload-ready Kaggle dataset folder"
-	@echo "make predict-crossed   crossed-design inference (D016): prompt-group assignment"
-	@echo "make package-crossed   upload-ready dataset + offline MiniLM grouping encoder"
+	@echo "make predict-crossed   WITHDRAWN (D017/D018) research-only crossed inference"
+	@echo "make package-crossed   WITHDRAWN research-only dataset + offline MiniLM encoder"
 
 install:
 	$(PYTHON) -m pip install -r requirements.txt
@@ -54,11 +56,19 @@ frozen-encoder:
 ensemble:
 	$(PYTHON) -m src.cli ensemble --dataset official
 
+evaluate:
+	$(PYTHON) -m src.cli evaluate --dataset official --artifacts artifacts/cv_identity/official \
+		--members char_tfidf_logreg style_only --weights 0.5 0.5
+
 figures:
 	$(PYTHON) -m src.cli figures --dataset official
 
 stability:
 	$(PYTHON) -m src.cli stability --config configs/submission.yaml --data-dir $(DATA)
+
+# Retired under D024: the command fails closed rather than reporting transductive scores.
+stress:
+	$(PYTHON) experiments/stress_k.py --data-dir $(DATA)
 
 predict:
 	$(PYTHON) -m src.cli predict --config configs/submission.yaml --data-dir $(DATA) --fit
@@ -66,10 +76,11 @@ predict:
 package:
 	$(PYTHON) -m src.cli package --dataset official
 
-# Crossed-design submission (D016): the same blend (configs/submission.yaml) plus
-# test-time prompt-group recovery + one-per-model assignment. Needs the optional
-# sentence-transformers dependency and a local MiniLM checkpoint (auto-resolved
-# from the HF cache, or set ENCODER_PATH=/path/to/checkpoint).
+# WITHDRAWN (D017/D018) — research-only, NOT the submission default. The same blend
+# (configs/submission.yaml) plus test-time prompt-group recovery + one-per-model
+# assignment; the gain is a k=18 artifact that does not deploy to a k~2 test. Needs
+# the optional sentence-transformers dependency and a local MiniLM checkpoint
+# (auto-resolved from the HF cache, or set ENCODER_PATH=/path/to/checkpoint).
 ENCODER_PATH ?=
 predict-crossed:
 	$(PYTHON) -m src.cli predict --config configs/submission.yaml --data-dir $(DATA) --fit --crossed $(if $(ENCODER_PATH),--encoder-path $(ENCODER_PATH),)

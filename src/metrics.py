@@ -124,6 +124,43 @@ def aggregate_folds(fold_metrics: Iterable[dict]) -> dict:
     }
 
 
+def paired_difference(base, other) -> np.ndarray:
+    """Elementwise ``other - base`` for paired scores (e.g. method vs argmax).
+
+    Both sequences must have the same length: each pair is measured on the same
+    rows/subsample, so the difference removes the shared subsampling noise.
+    """
+    a = np.asarray(base, dtype=np.float64)
+    b = np.asarray(other, dtype=np.float64)
+    if a.shape != b.shape:
+        raise ValueError(f"paired length mismatch: {a.shape} vs {b.shape}")
+    return b - a
+
+
+def mean_ci(values, confidence: float = 0.95) -> dict:
+    """Mean, sample std (ddof=1), n and a Student-t confidence interval.
+
+    Used to summarise a statistic repeated over subsample seeds/folds. With a
+    single value the interval collapses to the point (no spread estimate).
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be in (0, 1)")
+    arr = np.asarray(values, dtype=np.float64)
+    n = int(arr.size)
+    if n == 0:
+        raise ValueError("no values to summarise")
+    mean = float(arr.mean())
+    if n < 2:
+        return {"n": n, "mean": mean, "std": 0.0,
+                "ci_low": mean, "ci_high": mean, "ci_half": 0.0}
+    std = float(arr.std(ddof=1))
+    from scipy.stats import t
+
+    half = float(t.ppf(0.5 + confidence / 2.0, n - 1) * std / np.sqrt(n))
+    return {"n": n, "mean": mean, "std": std,
+            "ci_low": mean - half, "ci_high": mean + half, "ci_half": half}
+
+
 def provider_of(label: str) -> str:
     from src.constants import PROVIDER_OF
 
@@ -143,6 +180,68 @@ def within_provider_confusions(
         "within_provider_errors": int((wrong & same).sum()),
         "cross_provider_errors": int((wrong & ~same).sum()),
     }
+
+
+def length_band_metrics(
+    y_true,
+    y_pred,
+    lengths,
+    edges: Sequence[float] = (0, 50, 100, 200, 400, 800),
+    labels: Sequence[str] = LABELS,
+) -> list[dict]:
+    """Balanced accuracy and error mix per passage-length band (plan §9 item 9).
+
+    Bands are ``[edges[i], edges[i+1])`` with the last one open-ended, so a
+    length exactly on an edge belongs to the upper band. Each band's balanced
+    accuracy averages only the classes it contains; bands with different class
+    coverage are therefore not directly comparable, which is why
+    ``classes_present`` is reported alongside it. Empty bands yield ``None``.
+    """
+    yt = _as_label_array(y_true)
+    yp = _as_label_array(y_pred)
+    if yt.shape != yp.shape:
+        raise ValueError(f"shape mismatch: {yt.shape} vs {yp.shape}")
+    words = np.asarray(lengths, dtype=np.float64)
+    if words.shape != yt.shape:
+        raise ValueError(f"length shape mismatch: {words.shape} vs {yt.shape}")
+    if not np.isfinite(words).all() or (words < 0).any():
+        raise ValueError("lengths must be finite and non-negative")
+    bounds = [float(e) for e in edges]
+    if not bounds or bounds[0] != 0.0:
+        raise ValueError("edges must start at 0 so every passage is banded")
+    if any(b <= a for a, b in zip(bounds, bounds[1:])):
+        raise ValueError("edges must be strictly increasing")
+
+    out: list[dict] = []
+    for i, lower in enumerate(bounds):
+        upper = bounds[i + 1] if i + 1 < len(bounds) else None
+        mask = words >= lower
+        if upper is not None:
+            mask &= words < upper
+        n = int(mask.sum())
+        band = {
+            "band": f"[{lower:g}, {upper:g})" if upper is not None else f"[{lower:g}, inf)",
+            "lower": lower,
+            "upper": upper,
+            "n": n,
+            "classes_present": int(np.unique(yt[mask]).size) if n else 0,
+            "balanced_accuracy": None,
+            "accuracy": None,
+            "errors": 0,
+            "within_provider_errors": 0,
+            "cross_provider_errors": 0,
+            "mean_words": None,
+            "median_words": None,
+        }
+        if n:
+            truth, pred = yt[mask], yp[mask]
+            band["balanced_accuracy"] = balanced_accuracy(truth, pred, labels)
+            band["accuracy"] = float((truth == pred).mean())
+            band.update(within_provider_confusions(truth, pred, labels))
+            band["mean_words"] = float(words[mask].mean())
+            band["median_words"] = float(np.median(words[mask]))
+        out.append(band)
+    return out
 
 
 def reports_frame(results: Sequence[dict]) -> pd.DataFrame:

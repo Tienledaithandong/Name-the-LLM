@@ -9,7 +9,10 @@ from src.metrics import (
     class_support,
     confusion_matrix,
     evaluate,
+    length_band_metrics,
     macro_f1,
+    mean_ci,
+    paired_difference,
     per_class_recall,
     within_provider_confusions,
 )
@@ -91,3 +94,116 @@ def test_within_provider_confusions_counts_same_provider_errors():
     assert counts["errors"] == 2
     assert counts["within_provider_errors"] == 1
     assert counts["cross_provider_errors"] == 1
+
+
+def test_paired_difference_is_elementwise_other_minus_base():
+    base = [0.40, 0.50, 0.60]
+    other = [0.42, 0.48, 0.65]
+    diff = paired_difference(base, other)
+    assert diff == pytest.approx([0.02, -0.02, 0.05])
+
+
+def test_paired_difference_rejects_length_mismatch():
+    with pytest.raises(ValueError, match="paired length mismatch"):
+        paired_difference([0.1, 0.2], [0.1])
+
+
+def test_mean_ci_single_value_collapses_to_point():
+    summary = mean_ci([0.42])
+    assert summary["n"] == 1
+    assert summary["mean"] == pytest.approx(0.42)
+    assert summary["std"] == 0.0
+    assert summary["ci_low"] == pytest.approx(0.42)
+    assert summary["ci_high"] == pytest.approx(0.42)
+
+
+def test_mean_ci_brackets_mean_with_sample_std():
+    values = [0.40, 0.42, 0.44, 0.46]
+    summary = mean_ci(values)
+    assert summary["n"] == 4
+    assert summary["mean"] == pytest.approx(0.43)
+    assert summary["std"] == pytest.approx(np.std(values, ddof=1))
+    assert summary["ci_low"] < summary["mean"] < summary["ci_high"]
+    assert summary["ci_half"] == pytest.approx(
+        summary["ci_high"] - summary["mean"]
+    )
+
+
+def test_mean_ci_rejects_empty_and_bad_confidence():
+    with pytest.raises(ValueError, match="no values"):
+        mean_ci([])
+    with pytest.raises(ValueError, match="confidence"):
+        mean_ci([0.1, 0.2], confidence=1.5)
+
+
+def test_length_band_metrics_puts_edge_lengths_in_the_upper_band():
+    bands = length_band_metrics(
+        ["a", "a", "b", "b"], ["a", "b", "b", "b"], [0, 50, 50, 100],
+        edges=(0, 50, 100), labels=LABELS3,
+    )
+    assert [b["band"] for b in bands] == ["[0, 50)", "[50, 100)", "[100, inf)"]
+    assert [b["n"] for b in bands] == [1, 2, 1]
+    # band 0: a->a. band 1: a->b, b->b (recalls 0 and 1). band 2: b->b.
+    assert bands[0]["balanced_accuracy"] == pytest.approx(1.0)
+    assert bands[1]["balanced_accuracy"] == pytest.approx(0.5)
+    assert bands[1]["accuracy"] == pytest.approx(0.5)
+    assert bands[1]["errors"] == 1
+    assert bands[2]["balanced_accuracy"] == pytest.approx(1.0)
+    assert bands[1]["mean_words"] == pytest.approx(50.0)
+    assert bands[1]["median_words"] == pytest.approx(50.0)
+
+
+def test_length_band_metrics_scores_only_classes_present_in_the_band():
+    bands = length_band_metrics(
+        ["a", "a", "c"], ["a", "b", "c"], [10, 20, 900],
+        edges=(0, 100, 800), labels=LABELS3,
+    )
+    assert bands[0]["classes_present"] == 1
+    assert bands[0]["balanced_accuracy"] == pytest.approx(0.5)
+    assert bands[1]["n"] == 0
+    assert bands[1]["classes_present"] == 0
+    assert bands[1]["balanced_accuracy"] is None
+    assert bands[1]["accuracy"] is None
+    assert bands[1]["mean_words"] is None
+    assert bands[1]["errors"] == 0
+    assert bands[2]["balanced_accuracy"] == pytest.approx(1.0)
+
+
+def test_length_band_metrics_splits_provider_errors_per_band():
+    bands = length_band_metrics(
+        ["gemini-3.6-flash", "gemini-3.7-flash", "gpt-5.5"],
+        ["gemini-3.7-flash", "gpt-5.5", "gpt-5.5"],
+        [10, 10, 900], edges=(0, 100, 800),
+    )
+    assert bands[0]["errors"] == 2
+    assert bands[0]["within_provider_errors"] == 1
+    assert bands[0]["cross_provider_errors"] == 1
+    assert bands[2]["errors"] == 0
+
+
+def test_length_band_metrics_single_band_reproduces_pooled_score():
+    y_true = ["a", "b", "b", "c"]
+    y_pred = ["a", "b", "c", "c"]
+    lengths = [3, 900, 40, 12]
+    bands = length_band_metrics(y_true, y_pred, lengths, edges=(0,), labels=LABELS3)
+    assert len(bands) == 1
+    assert bands[0]["n"] == 4
+    assert bands[0]["balanced_accuracy"] == pytest.approx(
+        balanced_accuracy(y_true, y_pred, LABELS3)
+    )
+
+
+def test_length_band_metrics_rejects_bad_edges_and_lengths():
+    y = ["a", "b"]
+    with pytest.raises(ValueError, match="start at 0"):
+        length_band_metrics(y, y, [10, 20], edges=(50, 100), labels=LABELS3)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        length_band_metrics(y, y, [10, 20], edges=(0, 100, 50), labels=LABELS3)
+    with pytest.raises(ValueError, match="start at 0"):
+        length_band_metrics(y, y, [10, 20], edges=(), labels=LABELS3)
+    with pytest.raises(ValueError, match="non-negative"):
+        length_band_metrics(y, y, [-1, 20], labels=LABELS3)
+    with pytest.raises(ValueError, match="length shape mismatch"):
+        length_band_metrics(y, y, [10], labels=LABELS3)
+    with pytest.raises(ValueError, match="shape mismatch"):
+        length_band_metrics(y, ["a"], [10, 20], labels=LABELS3)

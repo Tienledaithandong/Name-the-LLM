@@ -73,26 +73,24 @@ def _short(label: str) -> str:
     return label.replace("gemini-", "gem-").replace("claude-", "cl-").replace("preview", "prev")
 
 
-def make_report_figures(
-    artifacts_dir: str | Path,
+def make_prediction_figures(
+    truth,
+    pred,
     out_dir: str | Path,
-    weights: dict[str, float] | None = None,
     dataset_label: str = "official",
+    blend_name: str = "blend",
 ) -> list[str]:
+    """Confusion matrix and per-class recall for one set of OOF predictions."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    artifacts_dir = Path(artifacts_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    metrics = load_metrics(artifacts_dir)
-    truth, pred, used_weights, blend_name = blend_predictions(artifacts_dir, weights)
     written: list[str] = []
     suffix = "" if dataset_label == "official" else f"_{dataset_label}"
 
-    # 1. Confusion matrix of the adopted blend (row = true, col = predicted).
     cm = confusion_matrix(truth, pred)
     fig, ax = plt.subplots(figsize=(11, 9))
     im = ax.imshow(cm, cmap="Blues", aspect="auto")
@@ -110,7 +108,6 @@ def make_report_figures(
     plt.close(fig)
     written.append(str(path))
 
-    # 2. Per-class recall, sorted, coloured by provider.
     recalls = per_class_recall(truth, pred)
     order = sorted(LABELS, key=lambda l: (np.nan_to_num(recalls[l], nan=-1.0)))
     values = [recalls[l] for l in order]
@@ -131,63 +128,167 @@ def make_report_figures(
     fig.savefig(path, dpi=140)
     plt.close(fig)
     written.append(str(path))
+    return written
 
-    # 3. Ablation: pooled OOF per model.
-    rows = sorted(
-        metrics.items(), key=lambda kv: kv[1]["pooled"]["balanced_accuracy"]
+
+def make_length_band_figure(
+    bands_by_variant: dict[str, list[dict]],
+    out_dir: str | Path,
+    dataset_label: str = "official",
+) -> str:
+    """Balanced accuracy per passage-length band, one line per blend."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not bands_by_variant:
+        raise ValueError("at least one variant is required")
+    reference = next(iter(bands_by_variant.values()))
+    for bands in bands_by_variant.values():
+        if [b["band"] for b in bands] != [b["band"] for b in reference]:
+            raise ValueError("all variants must use the same length bands")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    palette = ["#3b6ea5", "#c0703f", "#4c9a6a", "#7a5aa0", "#b5893b"]
+    positions = np.arange(len(reference))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i, (name, bands) in enumerate(bands_by_variant.items()):
+        values = [b["balanced_accuracy"] for b in bands]
+        ax.plot(positions, values, marker="o", color=palette[i % len(palette)],
+                label=name, linewidth=1.8)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(
+        [f"{b['band']}\nn={b['n']}, {b['classes_present']} classes" for b in reference],
+        fontsize=8,
     )
-    names = [k for k, _ in rows]
-    pooled = [v["pooled"]["balanced_accuracy"] for _, v in rows]
+    ax.set_ylabel("balanced accuracy within band")
+    ax.set_ylim(0, 1)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_title(
+        "Text-length sensitivity — pooled OOF by passage word count "
+        f"({dataset_label}); each band averages only the classes it contains"
+    )
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    suffix = "" if dataset_label == "official" else f"_{dataset_label}"
+    path = out_dir / f"length_band_accuracy{suffix}.png"
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+    return str(path)
+
+
+def _panel_axes(out_dir: str | Path, dataset_label: str, stem: str):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "" if dataset_label == "official" else f"_{dataset_label}"
+    return plt, out_dir / f"{stem}{suffix}.png"
+
+
+def make_ablation_figure(
+    metrics: dict[str, dict], out_dir: str | Path, dataset_label: str = "official"
+) -> str:
+    """Pooled OOF balanced accuracy per model/arm, sorted ascending."""
+    if not metrics:
+        raise ValueError("at least one model is required")
+    plt, path = _panel_axes(out_dir, dataset_label, "ablation")
+    rows = sorted(metrics.items(), key=lambda kv: kv[1]["pooled"]["balanced_accuracy"])
     fig, ax = plt.subplots(figsize=(9, 6))
-    ax.barh(names, pooled, color="#3b6ea5")
+    ax.barh([k for k, _ in rows], [v["pooled"]["balanced_accuracy"] for _, v in rows],
+            color="#3b6ea5")
     ax.set_xlabel("pooled out-of-fold balanced accuracy")
     ax.set_title(f"Ablation — pooled OOF by model ({dataset_label})")
     ax.axvline(1.0 / len(LABELS), color="#999999", linestyle="--", linewidth=1)
     fig.tight_layout()
-    path = out_dir / f"ablation{suffix}.png"
     fig.savefig(path, dpi=140)
     plt.close(fig)
-    written.append(str(path))
+    return str(path)
 
-    # 4. Runtime / RAM tradeoff: fit seconds vs pooled OOF, bubble = peak RSS.
+
+def make_runtime_ram_figure(
+    metrics: dict[str, dict], out_dir: str | Path, dataset_label: str = "official"
+) -> str:
+    """Fit seconds vs pooled OOF; bubble area ∝ peak fit RSS where recorded.
+
+    An arm whose peak RSS was never recorded is drawn hollow and labelled, never
+    as a zero-area bubble that would read as "no memory used".
+    """
+    if not metrics:
+        raise ValueError("at least one model is required")
+    plt, path = _panel_axes(out_dir, dataset_label, "runtime_ram")
     fig, ax = plt.subplots(figsize=(9, 6))
+    unrecorded = False
     for name, payload in metrics.items():
-        fit = max(payload.get("fit_seconds", 0.0), 0.01)
+        fit = max(payload.get("fit_seconds") or 0.0, 0.01)
         acc = payload["pooled"]["balanced_accuracy"]
-        ram = max(payload.get("peak_ram_gb", 0.0), 0.01)
-        ax.scatter(fit, acc, s=ram * 900 + 20, alpha=0.6, color="#4c9a6a")
-        ax.annotate(name, (fit, acc), fontsize=6, xytext=(3, 3),
+        ram = payload.get("peak_ram_gb")
+        if ram is None:
+            unrecorded = True
+            ax.scatter(fit, acc, s=90, facecolors="none", edgecolors="#4c9a6a",
+                       linewidths=1.4)
+            label = f"{name} (RAM n/r)"
+        else:
+            ax.scatter(fit, acc, s=max(ram, 0.01) * 900 + 20, alpha=0.6, color="#4c9a6a")
+            label = name
+        ax.annotate(label, (fit, acc), fontsize=6, xytext=(3, 3),
                     textcoords="offset points")
     ax.set_xscale("log")
+    fits = [max(p.get("fit_seconds") or 0.0, 0.01) for p in metrics.values()]
+    ax.set_xlim(min(fits) / 1.8, max(fits) * 6)
     ax.set_xlabel("fit seconds, all folds (log scale)")
     ax.set_ylabel("pooled OOF balanced accuracy")
-    ax.set_title(f"Runtime / RAM tradeoff (bubble area ∝ peak RSS, {dataset_label})")
+    title = f"Runtime / RAM tradeoff (bubble area ∝ peak RSS, {dataset_label})"
+    if unrecorded:
+        title += "\nhollow = peak fit RSS not recorded for that run"
+    ax.set_title(title, fontsize=10)
     fig.tight_layout()
-    path = out_dir / f"runtime_ram{suffix}.png"
     fig.savefig(path, dpi=140)
     plt.close(fig)
-    written.append(str(path))
+    return str(path)
 
-    # 5. Grouped-CV variation: per-fold balanced accuracy spread per model.
-    fig, ax = plt.subplots(figsize=(10, 6))
-    fold_rows = sorted(
-        metrics.items(), key=lambda kv: kv[1]["fold_aggregate"]["mean"]
-    )
+
+def make_cv_variation_figure(
+    metrics: dict[str, dict], out_dir: str | Path, dataset_label: str = "official"
+) -> str:
+    """Per-fold balanced accuracy points plus mean ± std, sorted by mean."""
+    if not metrics:
+        raise ValueError("at least one model is required")
+    plt, path = _panel_axes(out_dir, dataset_label, "cv_variation")
+    fold_rows = sorted(metrics.items(), key=lambda kv: kv[1]["fold_aggregate"]["mean"])
     positions = np.arange(len(fold_rows))
-    for pos, (name, payload) in zip(positions, fold_rows, strict=True):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for pos, (_name, payload) in zip(positions, fold_rows, strict=True):
         scores = payload["fold_aggregate"]["fold_scores"]
         ax.scatter([pos] * len(scores), scores, color="#3b6ea5", alpha=0.5, s=18)
-        mean = payload["fold_aggregate"]["mean"]
-        std = payload["fold_aggregate"]["std"]
-        ax.errorbar(pos, mean, yerr=std, fmt="o", color="#c0703f", capsize=3)
+        ax.errorbar(pos, payload["fold_aggregate"]["mean"],
+                    yerr=payload["fold_aggregate"]["std"], fmt="o",
+                    color="#c0703f", capsize=3)
     ax.set_xticks(positions)
     ax.set_xticklabels([k for k, _ in fold_rows], rotation=45, ha="right", fontsize=7)
     ax.set_ylabel("per-fold balanced accuracy")
     ax.set_title(f"Grouped-CV variation — mean ± std and fold points ({dataset_label})")
     fig.tight_layout()
-    path = out_dir / f"cv_variation{suffix}.png"
     fig.savefig(path, dpi=140)
     plt.close(fig)
-    written.append(str(path))
+    return str(path)
 
+
+def make_report_figures(
+    artifacts_dir: str | Path,
+    out_dir: str | Path,
+    weights: dict[str, float] | None = None,
+    dataset_label: str = "official",
+) -> list[str]:
+    metrics = load_metrics(artifacts_dir)
+    truth, pred, _used_weights, blend_name = blend_predictions(artifacts_dir, weights)
+    written = make_prediction_figures(truth, pred, out_dir, dataset_label, blend_name)
+    written.append(make_ablation_figure(metrics, out_dir, dataset_label))
+    written.append(make_runtime_ram_figure(metrics, out_dir, dataset_label))
+    written.append(make_cv_variation_figure(metrics, out_dir, dataset_label))
     return written

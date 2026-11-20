@@ -1,0 +1,30 @@
+# Priority 5 (larger ensembles): the two sparse views that baseline.yaml measured
+# standalone but that were never blended with the cap-40k pool-MIX candidate.
+# Re-run under the current harness so the OOF carries D024 provenance (fingerprint
+# + fold ids); the 2026-11-14 artifacts/cv OOF predates it and cannot be aligned.
+# Same feature settings as configs/baseline.yaml; LinearSVC margins are NOT probabilities.
+seed: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  method: auto
+
+features:
+  max_features: 100000
+  min_df: 2
+  sublinear_tf: true
+  char_ngram_range: [2, 5]
+  word_ngram_range: [1, 2]
+
+models:
+  - name: word_tfidf_linearsvc
+    features: [word]
+    classifier: linearsvc
+    C: 1.0
+    max_features: 80000
+  - name: char_wb_tfidf_linearsvc
+    features: [char_wb]
+    classifier: linearsvc
+    C: 1.0
+    max_features: 100000

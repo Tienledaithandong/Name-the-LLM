@@ -39,11 +39,14 @@ def test_macro_f1_zero_predictions_and_all_wrong():
             f1_score(truth, pred, labels=['a','b'], average='macro', zero_division=0))
 
 
-def test_absent_class_cannot_beat_present_scores():
+def test_absent_class_takes_the_neutral_value():
+    # Merged protocol: an absent fold class is neutral (0.0), not a -1e9 veto,
+    # so one member missing a class cannot sink another member that scored it.
     scores = np.array([[1., -1., -1e9]])
     normalized = normalize_scores(scores)
+    assert np.isfinite(normalized).all()
+    assert normalized[0, 2] == 0.0
     assert normalized.argmax(axis=1)[0] == 0
-    assert normalized[0, 2] < normalized[0, 1]
 
 
 def test_oof_provenance_and_min_gain(train_df, folds, tmp_path):

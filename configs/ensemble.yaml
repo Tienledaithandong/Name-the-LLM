@@ -1,10 +1,11 @@
 # Section 7: greedy blend from fold-aligned OOF margins.
-# Members are whatever OOF files exist in the chosen artifacts folder; the
-# selector caps the number of members to keep the submission simple.
+# Only explicitly listed OOF members may enter selection. Add an experiment
+# here deliberately after validating its dataset and folds.
 seed: 42
 
 ensemble:
   method: greedy
   max_models: 4
+  members: [char_tfidf_logreg, style_only]
   # Require a gain over the best single model before adopting the blend:
   min_gain: 0.002

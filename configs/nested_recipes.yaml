@@ -1,0 +1,24 @@
+# The three members of the H10 recipe gate (D056): the adopted pool-MIX pair plus
+# the pool-trained word view. Feature settings are the harness defaults, which are
+# identical to configs/blend_members.yaml's explicit block (min_df 2, sublinear_tf,
+# char [2,5], word [1,2]); char/style match configs/submission.yaml exactly so the
+# base recipe refits the adopted candidate, not a variant.
+# LinearSVC margins are NOT probabilities.
+seed: 42
+
+models:
+  - name: char_tfidf_logreg
+    features: [char]
+    classifier: logreg
+    C: 2.0
+    max_features: 100000
+  - name: style_only
+    features: []
+    style: true
+    classifier: logreg
+    C: 1.0
+  - name: word_tfidf_linearsvc
+    features: [word]
+    classifier: linearsvc
+    C: 1.0
+    max_features: 80000

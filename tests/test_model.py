@@ -79,3 +79,76 @@ def test_majority_baseline_predicts_a_valid_label(train_df):
     predictions = set(bundle.predict(["anything at all"]))
     assert len(predictions) == 1
     assert predictions <= set(LABELS)
+
+
+def test_gbdt_requires_dense_input():
+    with pytest.raises(ModelError, match="gbdt needs dense"):
+        ModelSpec.from_dict({"name": "g", "classifier": "gbdt", "features": ["char"]})
+    spec = ModelSpec.from_dict(
+        {"name": "g", "classifier": "gbdt", "features": [], "style": True}
+    )
+    assert spec.classifier == "gbdt"
+    spec2 = ModelSpec.from_dict(
+        {"name": "g", "classifier": "gbdt", "features": ["char"], "svd": 8}
+    )
+    assert spec2.svd == 8
+
+
+def test_gbdt_classifier_factory():
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    spec = ModelSpec.from_dict(
+        {"name": "g", "classifier": "gbdt", "features": [], "style": True, "max_iter": 15}
+    )
+    clf = build_classifier(spec)
+    assert isinstance(clf, HistGradientBoostingClassifier)
+    assert clf.max_iter == 15
+    assert clf.class_weight == "balanced"
+
+
+def _gbdt_style_config():
+    return {
+        "name": "gbdt_style",
+        "features": [],
+        "style": True,
+        "classifier": "gbdt",
+        "max_iter": 15,
+        "max_leaf_nodes": 7,
+        "min_samples_leaf": 2,
+        "learning_rate": 0.2,
+    }
+
+
+def test_gbdt_style_only_bundle(train_df, tmp_path):
+    subset = train_df.groupby("model", observed=True).head(6).reset_index(drop=True)
+    bundle = estimator_from_config(_gbdt_style_config(), seed=0)
+    bundle.fit(subset["text"].tolist(), labels_to_indices(subset["model"].tolist()))
+    scores = bundle.decision_function(subset["text"].head(7).tolist())
+    assert scores.shape == (7, N_CLASSES)
+    assert bundle.class_order == LABELS
+    assert set(bundle.predict(subset["text"].head(7).tolist())) <= set(LABELS)
+    path = bundle.save(tmp_path / "gbdt.joblib")
+    reloaded = ModelBundle.load(path)
+    assert np.allclose(scores, reloaded.decision_function(subset["text"].head(7).tolist()))
+
+
+def test_gbdt_multiview_svd_bundle(train_df):
+    subset = train_df.groupby("model", observed=True).head(6).reset_index(drop=True)
+    cfg = {
+        "name": "gbdt_svd",
+        "features": ["char", "word"],
+        "style": True,
+        "svd": 8,
+        "classifier": "gbdt",
+        "max_features": 500,
+        "min_df": 1,
+        "char_ngram_range": [2, 3],
+        "max_iter": 15,
+        "max_leaf_nodes": 7,
+        "min_samples_leaf": 2,
+    }
+    bundle = estimator_from_config(cfg, seed=0)
+    bundle.fit(subset["text"].tolist(), labels_to_indices(subset["model"].tolist()))
+    scores = bundle.decision_function(subset["text"].head(5).tolist())
+    assert scores.shape == (5, N_CLASSES)
+    assert np.isfinite(scores).all()

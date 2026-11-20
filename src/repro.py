@@ -29,6 +29,21 @@ def git_commit(cwd: str | Path | None = None) -> str:
         return "unknown"
 
 
+def git_worktree_status(cwd: str | Path | None = None) -> str:
+    """Report tracked and untracked non-ignored changes that make HEAD incomplete."""
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+            timeout=10, check=False,
+        )
+        if out.returncode != 0:
+            return "unknown"
+        return "dirty" if out.stdout.strip() else "clean"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def env_snapshot() -> dict:
     snapshot = {
         "python": sys.version.split()[0],
